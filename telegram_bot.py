@@ -101,7 +101,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-2.0-flash", contents=parts)
+                model="gemini-3.5-flash", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
