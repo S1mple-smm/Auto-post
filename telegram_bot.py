@@ -114,7 +114,12 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     raise RuntimeError("Exhausted Gemini retries")
 
 def ai_group_images(image_paths: list) -> list:
-    """Send thumbnails to Gemini, get back groups of image indices."""
+    """
+    Send thumbnails to Gemini:
+    1. Group images by product
+    2. Within each group, sort renders first then real photos
+    Returns list of groups with renders first.
+    """
     parts = []
     for i, path in enumerate(image_paths):
         parts.append(types.Part.from_text(text=f"[IMAGE_{i}]"))
@@ -127,18 +132,22 @@ def ai_group_images(image_paths: list) -> list:
     parts.append(types.Part.from_text(text="""
 You are a sportswear product sorter. Photos are labelled [IMAGE_0], [IMAGE_1], etc.
 
-STRICT RULES:
-1. Each unique product (team + color combination) = its own separate group
-2. Same product from different angles/views = SAME group
-3. Different color of same team kit = DIFFERENT group (e.g. Spain red and Spain blue = 2 groups)
-4. Different team = DIFFERENT group (e.g. Brazil and Spain = 2 groups)
-5. NEVER put photos of different products in the same group
-6. If unsure, make separate groups — it is better to have more groups than fewer
+TASK 1 — GROUP by product:
+- Each unique product (team + color combination) = its own separate group
+- Same product from different angles/views = SAME group
+- Different color of same team kit = DIFFERENT group
+- Different team = DIFFERENT group
+- NEVER mix different products in one group
+- If unsure, make separate groups
 
-Reply ONLY with a valid JSON array of groups.
-Each group is a list of image indices (integers).
-Example for 3 products: [[0,1],[2,3],[4,5,6]]
-No explanation, no markdown, no text — ONLY the JSON array.
+TASK 2 — SORT within each group (renders first):
+- 3D renders / digital illustrations / clean white-background product shots = FIRST
+- Real photos of people wearing the kit / on a person = LAST
+- If all are the same type, keep original order
+
+Reply ONLY with a valid JSON array of groups, each group already sorted renders-first.
+Example: [[2,0,1],[4,3],[5,6,7]]
+No explanation, no markdown — ONLY the JSON array.
 """))
 
     raw = gemini_call(parts)
