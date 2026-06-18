@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY telegram_bot.py shop.json* ./
+COPY telegram_bot.py .
+COPY shop.json .
 
 CMD ["python", "telegram_bot.py"]
