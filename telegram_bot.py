@@ -101,7 +101,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-3.5-flash-lite", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -125,16 +125,20 @@ def ai_group_images(image_paths: list) -> list:
             parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
 
     parts.append(types.Part.from_text(text="""
-You are a sportswear product sorter.
-Photos are labelled [IMAGE_0], [IMAGE_1], etc.
+You are a sportswear product sorter. Photos are labelled [IMAGE_0], [IMAGE_1], etc.
 
-Group images showing the SAME product (same team kit + same color variant).
-Same product from different angles = SAME group.
-Different color = DIFFERENT group.
-Different team = DIFFERENT group.
+STRICT RULES:
+1. Each unique product (team + color combination) = its own separate group
+2. Same product from different angles/views = SAME group
+3. Different color of same team kit = DIFFERENT group (e.g. Spain red and Spain blue = 2 groups)
+4. Different team = DIFFERENT group (e.g. Brazil and Spain = 2 groups)
+5. NEVER put photos of different products in the same group
+6. If unsure, make separate groups — it is better to have more groups than fewer
 
-Reply ONLY with a JSON array of groups. Example: [[0,1,2],[3,4],[5,6,7]]
-No explanation, no markdown, just the JSON.
+Reply ONLY with a valid JSON array of groups.
+Each group is a list of image indices (integers).
+Example for 3 products: [[0,1],[2,3],[4,5,6]]
+No explanation, no markdown, no text — ONLY the JSON array.
 """))
 
     raw = gemini_call(parts)
