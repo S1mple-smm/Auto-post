@@ -45,8 +45,8 @@ ALLOWED_USERS  = set(os.getenv("ALLOWED_USER_IDS", "").split(","))  # comma-sepa
 SHOP_CONFIG_FILE = "shop.json"
 SUPPORTED_EXT    = {".jpg", ".jpeg", ".png", ".webp"}
 MAX_ALBUM_SIZE   = 10
-GEMINI_RPM       = 5
-GEMINI_RPD       = 20
+GEMINI_RPM       = 15
+GEMINI_RPD       = 500
 
 # ── Rate limiter ───────────────────────────────────────────────────────────────
 class RateLimiter:
@@ -101,7 +101,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.5-flash", contents=parts)
+                model="gemini-3.1-flash-lite", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
