@@ -101,7 +101,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash-lite-preview-06-17", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -113,61 +113,76 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
                 raise
     raise RuntimeError("Exhausted Gemini retries")
 
-def ai_group_images(image_paths: list) -> list:
+def describe_single_image(path: str, index: int) -> dict:
     """
-    Send thumbnails to Gemini:
-    1. Group images by product
-    2. Within each group, sort renders first then real photos
-    Returns list of groups with renders first.
+    Ask Gemini to describe ONE image in detail.
+    More reliable than analysing many images in one call with a lite model.
+    Returns: {"team": str, "color": str, "type": "render"|"photo"}
     """
-    parts = []
-    for i, path in enumerate(image_paths):
-        parts.append(types.Part.from_text(text=f"[IMAGE_{i}]"))
-        with PILImage.open(path) as img:
-            img.thumbnail((400, 400))
-            buf = io.BytesIO()
-            img.convert("RGB").save(buf, format="JPEG", quality=70)
-            parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+    with PILImage.open(path) as img:
+        img.thumbnail((500, 500))
+        buf = io.BytesIO()
+        img.convert("RGB").save(buf, format="JPEG", quality=75)
+        img_bytes = buf.getvalue()
 
-    parts.append(types.Part.from_text(text="""
-You are a sportswear product sorter. Photos are labelled [IMAGE_0], [IMAGE_1], etc.
+    parts = [
+        types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+        types.Part.from_text(text="""
+Look at this single sportswear product image carefully.
 
-TASK 1 — GROUP by product:
-- Each unique product (team + color combination) = its own separate group
-- Same product from different angles/views = SAME group
-- Different color of same team kit = DIFFERENT group
-- Different team = DIFFERENT group
-- NEVER mix different products in one group
-- If unsure, make separate groups
+Identify:
+1. "team" — the football team/country name visible on the jersey (crest, text, colors). If illegible, describe the kit by its dominant colors instead (e.g. "yellow-blue", "white-teal").
+2. "color" — the primary color variant of this specific kit (e.g. "yellow/blue", "white/teal", "red/navy")
+3. "type" — is this a "render" (clean digital/3D mockup, flat-lay studio shot, plain background, no visible human skin/face) or a "photo" (real photo of a person wearing it, or real fabric photographed on a hanger/floor with visible texture/wrinkles)
 
-TASK 2 — SORT within each group (renders first):
-- 3D renders / digital illustrations / clean white-background product shots = FIRST
-- Real photos of people wearing the kit / on a person = LAST
-- If all are the same type, keep original order
-
-Reply ONLY with a valid JSON array of groups, each group already sorted renders-first.
-Example: [[2,0,1],[4,3],[5,6,7]]
-No explanation, no markdown — ONLY the JSON array.
-"""))
-
+Reply ONLY with valid JSON, nothing else:
+{"team": "...", "color": "...", "type": "render"}
+""")
+    ]
     raw = gemini_call(parts)
     raw = raw.strip().strip("```json").strip("```").strip()
-
     try:
-        groups_idx = json.loads(raw)
+        data = json.loads(raw)
     except json.JSONDecodeError:
-        match = re.search(r'\[\s*\[.*?\]\s*\]', raw, re.DOTALL)
-        if match:
-            groups_idx = json.loads(match.group())
-        else:
-            log.warning(f"AI grouping parse failed, using single group. Raw: {raw[:200]}")
-            return [image_paths]
+        match = re.search(r'\{.*\}', raw, re.DOTALL)
+        data = json.loads(match.group()) if match else {"team": f"unknown_{index}", "color": "", "type": "photo"}
+    data["_index"] = index
+    data["_path"]  = path
+    return data
 
+def ai_group_images(image_paths: list) -> list:
+    """
+    Step 1: describe each image individually (team, color, type) — reliable for lite models.
+    Step 2: group by identical (team, color); sort renders before photos within each group.
+    """
+    descriptions = []
+    for i, path in enumerate(image_paths):
+        try:
+            d = describe_single_image(path, i)
+        except Exception as e:
+            log.warning(f"Failed to describe image {i}: {e}")
+            d = {"team": f"unknown_{i}", "color": "", "type": "photo", "_index": i, "_path": path}
+        descriptions.append(d)
+        log.info(f"  IMAGE_{i}: team='{d.get('team')}' color='{d.get('color')}' type='{d.get('type')}'")
+
+    # Group by normalized (team, color) key
+    groups_map = {}
+    order = []
+    for d in descriptions:
+        key = (str(d.get("team", "")).strip().lower(), str(d.get("color", "")).strip().lower())
+        if key not in groups_map:
+            groups_map[key] = []
+            order.append(key)
+        groups_map[key].append(d)
+
+    # Build final groups: renders first, then photos
     result = []
-    for group in groups_idx:
-        paths = [image_paths[i] for i in group if 0 <= i < len(image_paths)]
-        if paths:
-            result.append(paths)
+    for key in order:
+        items = groups_map[key]
+        renders = [d["_path"] for d in items if d.get("type") == "render"]
+        photos  = [d["_path"] for d in items if d.get("type") != "render"]
+        result.append(renders + photos)
+
     return result or [image_paths]
 
 def build_caption_prompt(cfg: dict) -> str:
@@ -339,7 +354,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await status_msg.edit_text(
             f"📦 *{doc.file_name}* downloaded\n"
-            f"🤖 AI is grouping photos by product…",
+            f"🤖 Analysing each photo individually (team/color/type)…",
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -349,7 +364,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await status_msg.edit_text("❌ No images found in the ZIP file.")
             return
 
-        # AI grouping (uses 1 Gemini request)
+        # AI grouping — 1 Gemini request PER IMAGE (more reliable with lite model)
         loop = asyncio.get_event_loop()
         groups = await loop.run_in_executor(None, ai_group_images, all_images)
 
