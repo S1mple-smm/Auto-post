@@ -101,7 +101,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash-lite-preview-06-17", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -115,9 +115,11 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
 
 def describe_single_image(path: str, index: int) -> dict:
     """
-    Ask Gemini to describe ONE image in detail.
-    More reliable than analysing many images in one call with a lite model.
-    Returns: {"team": str, "color": str, "type": "render"|"photo"}
+    Ask Gemini to describe ONE image — focus on VISUAL FINGERPRINT, not team identity.
+    A jersey's back view has no crest, so we rely on colors/pattern/trim instead,
+    which stay consistent between front, back, render, and real photo of the same product.
+    Returns: {"primary_color": str, "secondary_color": str, "pattern": str,
+              "garment": str, "type": "render"|"photo"}
     """
     with PILImage.open(path) as img:
         img.thumbnail((500, 500))
@@ -129,14 +131,20 @@ def describe_single_image(path: str, index: int) -> dict:
         types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
         types.Part.from_text(text="""
 Look at this single sportswear product image carefully.
+This could be a FRONT view, BACK view, a 3D render, or a real photo of the SAME jersey —
+your job is to describe its visual fingerprint so it can be matched to other images
+of the exact same product, even from a different angle.
 
 Identify:
-1. "team" — the football team/country name visible on the jersey (crest, text, colors). If illegible, describe the kit by its dominant colors instead (e.g. "yellow-blue", "white-teal").
-2. "color" — the primary color variant of this specific kit (e.g. "yellow/blue", "white/teal", "red/navy")
-3. "type" — is this a "render" (clean digital/3D mockup, flat-lay studio shot, plain background, no visible human skin/face) or a "photo" (real photo of a person wearing it, or real fabric photographed on a hanger/floor with visible texture/wrinkles)
+1. "primary_color" — the dominant base color of the jersey/shorts (e.g. "white", "red", "yellow")
+2. "secondary_color" — the main accent/trim color, if any (e.g. "navy", "black", "none")
+3. "pattern" — short description of any pattern/print/stripes visible (e.g. "plain", "diagonal stripes", "camo texture", "vertical stripes on sleeve")
+4. "garment" — "jersey+shorts" or "jersey" or "shorts" or "other"
+5. "type" — "render" if this is a clean digital/3D mockup or flat studio product shot with plain/no background and NO visible human skin or face;
+   "photo" if this is a real photo of a person wearing it, or real fabric on a hanger/floor with visible texture, wrinkles, or shadows
 
 Reply ONLY with valid JSON, nothing else:
-{"team": "...", "color": "...", "type": "render"}
+{"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render"}
 """)
     ]
     raw = gemini_call(parts)
@@ -145,15 +153,59 @@ Reply ONLY with valid JSON, nothing else:
         data = json.loads(raw)
     except json.JSONDecodeError:
         match = re.search(r'\{.*\}', raw, re.DOTALL)
-        data = json.loads(match.group()) if match else {"team": f"unknown_{index}", "color": "", "type": "photo"}
+        data = json.loads(match.group()) if match else {
+            "primary_color": f"unknown_{index}", "secondary_color": "", "pattern": "", "garment": "", "type": "photo"
+        }
     data["_index"] = index
     data["_path"]  = path
     return data
 
+def match_fingerprints(descriptions: list) -> list:
+    """
+    Step 2: send all the lightweight text fingerprints (no images) to Gemini in ONE
+    cheap text-only call, and ask it to cluster which indices belong to the same product.
+    This catches cases where front/back/render/photo of the same kit got slightly
+    different color/pattern wording in step 1.
+    """
+    fingerprint_lines = []
+    for d in descriptions:
+        fingerprint_lines.append(
+            f"{d['_index']}: primary={d.get('primary_color')}, secondary={d.get('secondary_color')}, "
+            f"pattern={d.get('pattern')}, garment={d.get('garment')}, type={d.get('type')}"
+        )
+    listing = "\n".join(fingerprint_lines)
+
+    prompt = f"""Below is a list of product image fingerprints, one per line, format:
+INDEX: primary=color, secondary=color, pattern=desc, garment=type, type=render/photo
+
+{listing}
+
+Cluster these indices into groups — each group = images of the SAME physical product
+(same color combo + same pattern), regardless of whether they are front/back/render/photo.
+Minor wording differences in pattern description can still mean the same product if colors match closely.
+Different primary OR secondary color = different product.
+
+Reply ONLY with a JSON array of groups of indices, e.g. [[0,1,2],[3,4]]
+No explanation, no markdown — ONLY the JSON array.
+"""
+    raw = gemini_call([types.Part.from_text(text=prompt)])
+    raw = raw.strip().strip("```json").strip("```").strip()
+    try:
+        groups_idx = json.loads(raw)
+    except json.JSONDecodeError:
+        match = re.search(r'\[\s*\[.*?\]\s*\]', raw, re.DOTALL)
+        groups_idx = json.loads(match.group()) if match else None
+
+    if not groups_idx:
+        # Fallback: each image its own group
+        return [[d["_index"]] for d in descriptions]
+    return groups_idx
+
 def ai_group_images(image_paths: list) -> list:
     """
-    Step 1: describe each image individually (team, color, type) — reliable for lite models.
-    Step 2: group by identical (team, color); sort renders before photos within each group.
+    Step 1: describe each image's visual fingerprint individually (reliable for lite models).
+    Step 2: cluster fingerprints into product groups via one cheap text-only call.
+    Step 3: sort each group renders-first, photos-last.
     """
     descriptions = []
     for i, path in enumerate(image_paths):
@@ -161,24 +213,26 @@ def ai_group_images(image_paths: list) -> list:
             d = describe_single_image(path, i)
         except Exception as e:
             log.warning(f"Failed to describe image {i}: {e}")
-            d = {"team": f"unknown_{i}", "color": "", "type": "photo", "_index": i, "_path": path}
+            d = {"primary_color": f"unknown_{i}", "secondary_color": "", "pattern": "",
+                 "garment": "", "type": "photo", "_index": i, "_path": path}
         descriptions.append(d)
-        log.info(f"  IMAGE_{i}: team='{d.get('team')}' color='{d.get('color')}' type='{d.get('type')}'")
+        log.info(f"  IMAGE_{i}: {d.get('primary_color')}/{d.get('secondary_color')} "
+                 f"pattern='{d.get('pattern')}' type='{d.get('type')}'")
 
-    # Group by normalized (team, color) key
-    groups_map = {}
-    order = []
-    for d in descriptions:
-        key = (str(d.get("team", "")).strip().lower(), str(d.get("color", "")).strip().lower())
-        if key not in groups_map:
-            groups_map[key] = []
-            order.append(key)
-        groups_map[key].append(d)
+    by_index = {d["_index"]: d for d in descriptions}
 
-    # Build final groups: renders first, then photos
+    try:
+        groups_idx = match_fingerprints(descriptions)
+    except Exception as e:
+        log.warning(f"Fingerprint matching failed, falling back to 1 group per image: {e}")
+        groups_idx = [[d["_index"]] for d in descriptions]
+
+    # Build final groups: renders first, then photos, preserving original order within each type
     result = []
-    for key in order:
-        items = groups_map[key]
+    for group in groups_idx:
+        items = [by_index[i] for i in group if i in by_index]
+        if not items:
+            continue
         renders = [d["_path"] for d in items if d.get("type") == "render"]
         photos  = [d["_path"] for d in items if d.get("type") != "render"]
         result.append(renders + photos)
