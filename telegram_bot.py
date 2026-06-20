@@ -130,23 +130,21 @@ def describe_single_image(path: str, index: int) -> dict:
     parts = [
         types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
         types.Part.from_text(text="""
-Look at this single sportswear product image carefully.
-This could be a FRONT view, BACK view, a 3D render, or a real photo of the SAME jersey —
-your job is to describe its visual fingerprint so it can be matched to other images
-of the exact same product, even from a different angle.
+Look at this single sportswear/footwear product image carefully.
+Identify its visual fingerprint so it can be matched to other images of the exact same product from different angles.
 
 Identify:
-1. "primary_color" — the dominant base color of the jersey/shorts (e.g. "white", "red", "yellow")
-2. "secondary_color" — the main accent/trim color, if any (e.g. "navy", "black", "none")
-3. "pattern" — short description of any pattern/print/stripes visible (e.g. "plain", "diagonal stripes", "camo texture", "vertical stripes on sleeve")
-4. "garment" — "jersey+shorts" or "jersey" or "shorts" or "other"
-5. "type" — "render" if this is a clean digital/3D mockup or flat studio product shot with plain/no background and NO visible human skin or face;
-   "photo" if this is a real photo of a person wearing it, or real fabric on a hanger/floor with visible texture, wrinkles, or shadows
+1. "primary_color" — the dominant base color of the item
+2. "secondary_color" — the main accent, trim, or sole color
+3. "pattern" — short description of any pattern, texture, or design
+4. "garment" — e.g., "football boots", "sneakers", "jersey", "shorts", or "equipment"
+5. "type" — "render" (clean 3D/studio mockup) or "photo" (real photo with shadows, backgrounds, or people)
 
 Reply ONLY with valid JSON, nothing else:
 {"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render"}
 """)
     ]
+
     raw = gemini_call(parts)
     raw = raw.strip().strip("```json").strip("```").strip()
     try:
@@ -247,15 +245,17 @@ def build_caption_prompt(cfg: dict) -> str:
     admin     = cfg.get("admin_tag", "")
     price     = cfg.get("price", "")
     delivery  = cfg.get("delivery", "")
-    sizes     = cfg.get("sizes", "S, M, L, XL, 2XL")
+    
+    # Defaults strictly to your required footwear sizes
+    sizes     = cfg.get("sizes", "38, 39, 40, 41, 42, 43, 44, 45") 
 
     example = (
-        f"Футбольная форма Реал Мадрид:\n"
-        f"⚽Многофункциональная: Идеально подходит для футбола, бега и других видов спорта.\n"
-        f"📐Размеры: Доступны размеры {sizes}.\n"
-        f"🧵 Материал: Легкий и дышащий полиэстер.\n"
-        f"🎨 Стиль: Спортивный, с коротким рукавом.\n"
-        f"👕Комфорт: Свободная посадка для удобства в движении.\n"
+        f"Phantom 6 Superfly:\n"
+        f"⚽Назначение: Идеально подходит для футбола и интенсивных тренировок.\n"
+        f"📐Размеры: В наличии размеры {sizes}.\n"
+        f"🧵Материал: Высокотехнологичные синтетические материалы.\n"
+        f"⚡Особенности: Превосходное сцепление и контроль мяча.\n"
+        f"👟Комфорт: Плотная и удобная посадка.\n"
         f"🚚Доставка осуществляется в течении {delivery}\n"
         f"💰{price}\n\n"
         f"{uzum_line}{tg_line}{admin}"
@@ -264,12 +264,13 @@ def build_caption_prompt(cfg: dict) -> str:
         f"You are a product copywriter for a sportswear shop.\n"
         f"Look at the product image(s) and write a Telegram post in {lang} "
         f"EXACTLY following this style:\n\n{example}\n\nRules:\n"
-        f"- First line: product name + colon (no emoji on first line)\n"
+        f"- First line: ONLY the model name + colon. DO NOT use brand names in the title or description.\n"
         f"- Emoji bullets for each feature\n"
-        f"- Include: purpose, sizes ({sizes}), material, style, comfort, delivery ({delivery}), price ({price})\n"
+        f"- Include: purpose, sizes ({sizes}), material, features, comfort, delivery ({delivery}), price ({price})\n"
         f"- End with shop links and admin tag exactly as shown\n"
         f"- Output ONLY the post text, no markdown, no backticks"
     )
+
 
 def generate_description(image_paths: list, cfg: dict) -> str:
     parts = []
