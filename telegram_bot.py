@@ -118,7 +118,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
 def ai_group_images(image_paths: list) -> list:
     """
     Passes all images to Gemini simultaneously for visual grouping.
-    Uses strict JSON keys to guarantee the final sorting order in Python.
+    Uses strict JSON keys and explicit visual cues to guarantee sorting order.
     """
     parts = []
     for i, path in enumerate(image_paths):
@@ -127,12 +127,17 @@ def ai_group_images(image_paths: list) -> list:
         
     prompt = """
     You are an expert sports apparel merchandiser. Look at all the provided images.
-    Group the images that show the EXACT same product (same team, same season, identical crest/logos, and colors). 
+    Group the images that show the EXACT same product (same team, same colors). 
+    
+    CRITICAL SORTING RULES:
+    You must distinguish between "3D Renders" and "Real Photos" based on these visual clues:
+    - 3D Renders: Have a pure white background, stand upright (ghost mannequin), and often have the "KOS" logo in the corner.
+    - Real Photos: Are flat-lays on a greyish floor/surface, have visible fabric wrinkles, and often show the shirt and shorts laid out side-by-side.
     
     For each product group, identify the image indices for:
-    - "front_view": The main front-facing clean 3D render/studio mockup. If none exists, pick the best front-facing real photo.
-    - "back_view": The back-facing clean 3D render/studio mockup. If none exists, pick the best back-facing real photo. (Use null if there is no back view).
-    - "other_photos": An array of any remaining images for this product (real photos, close-ups, angled shots, shadows, etc.).
+    - "front_view": MUST be the Front-facing 3D Render (white background). NEVER put a flat-lay real photo here if a 3D render exists.
+    - "back_view": MUST be the Back-facing 3D Render (white background). (Use null if there is no back view).
+    - "other_photos": Put ALL Real Photos (flat-lays on grey backgrounds) in this array.
     
     Return ONLY a valid JSON array of objects. Example:
     [
@@ -140,11 +145,6 @@ def ai_group_images(image_paths: list) -> list:
         "front_view": 2,
         "back_view": 5,
         "other_photos": [0, 1]
-      },
-      {
-        "front_view": 3,
-        "back_view": null,
-        "other_photos": [4]
       }
     ]
     Do not include any markdown, backticks, or explanations. Just the JSON array.
@@ -193,7 +193,6 @@ def ai_group_images(image_paths: list) -> list:
             result.append(current_group_paths)
             
     return result or [image_paths]
-
 
 def build_caption_prompt(cfg: dict) -> str:
     lang_map  = {"ru": "Russian", "uz": "Uzbek", "en": "English"}
