@@ -118,7 +118,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
 def ai_group_images(image_paths: list) -> list:
     """
     Passes all images to Gemini simultaneously for highly accurate 
-    visual grouping and sorting.
+    visual grouping and sorting, with strict fallback logic.
     """
     parts = []
     for i, path in enumerate(image_paths):
@@ -130,10 +130,15 @@ def ai_group_images(image_paths: list) -> list:
     Your task is to group the images that show the EXACT same product (same team, same season, identical crest/logos, and colors). 
     Be extremely careful with white or similar-colored kits—look closely at the crests, collar trims, and side panels to differentiate them.
     
-    For each group you find, you MUST sort the image indices in this specific order:
+    CRITICAL - DOUBLE CHECK YOUR WORK:
+    1. Verify that no two different products are mixed in the same group.
+    2. Verify the positions of the images in each group perfectly follow the sorting rules below.
+
+    SORTING RULES FOR EACH GROUP:
     1. Front View (clean render/studio mockup)
     2. Back View (clean render/studio mockup)
-    3. Real Photos (photos with shadows, wrinkles, or on a person/mannequin)
+    3. IF NO 3D RENDER EXISTS: Position 1 MUST be the Front View (Real Photo) and Position 2 MUST be the Back View (Real Photo).
+    4. Any remaining real photos (close-ups, angled shots, folded kits, shadows, wrinkles) go last.
     
     Return ONLY a valid JSON array of arrays containing the image indices.
     Example: [[0, 2, 5], [1, 3], [4]]
@@ -141,7 +146,7 @@ def ai_group_images(image_paths: list) -> list:
     """
     parts.append(types.Part.from_text(text=prompt))
     
-    log.info(f"Sending {len(image_paths)} images to Gemini for visual clustering...")
+    log.info(f"Sending {len(image_paths)} images to Gemini for visual clustering and sorting...")
     
     try:
         raw = gemini_call(parts)
@@ -167,7 +172,6 @@ def ai_group_images(image_paths: list) -> list:
             result.append(valid_group)
             
     return result or [image_paths]
-
 
 def build_caption_prompt(cfg: dict) -> str:
     lang_map  = {"ru": "Russian", "uz": "Uzbek", "en": "English"}
