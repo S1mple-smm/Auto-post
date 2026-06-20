@@ -115,7 +115,8 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
 
 def describe_single_image(path: str, index: int) -> dict:
     """
-    Ask Gemini to describe ONE image — focus on VISUAL FINGERPRINT and VIEW orientation.
+    Ask Gemini to describe ONE image — optimized to handle mixed collages 
+    and prioritize real photos to be the primary cover slot.
     """
     with PILImage.open(path) as img:
         img.thumbnail((500, 500))
@@ -126,24 +127,26 @@ def describe_single_image(path: str, index: int) -> dict:
     parts = [
         types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
         types.Part.from_text(text="""
-Look at this single sportswear product image carefully. 
-Analyze its visual details so it can be matched with other angles/views of the exact same physical kit.
+Analyze this sports kit item image. Note that this file might be a combination multi-window collage.
 
-Identify:
-1. "primary_color" — dominant base color (e.g., "white", "navy", "red"). Be consistent.
-2. "secondary_color" — main accent/trim color (e.g., "gold", "black", "none").
-3. "pattern" — very brief description of unique patterns, gradients, or stripes (e.g., "subtle geometric", "vertical stripes", "plain").
-4. "garment" — "jersey+shorts", "jersey", "shorts", or "other".
-5. "type" — "render" ONLY if it is a flawless digital 3D mockup, flat vector, or template graphic with a perfectly clean/solid background; 
-   "photo" if it is a real-life physical photo (creases, fabric textures, shadows, hanging on a wall, or worn by a human).
-6. "view" — "front" if showing the chest/front face; "back" if showing player number/name space or back face; "other" if side view or macro close-up.
+Identify the following details from the dominant view:
+1. "primary_color" — The main background fabric color (e.g., "blue", "white", "red", "yellow", "green").
+2. "secondary_color" — Accent or collar/sleeve trim colors (e.g., "gold", "navy", "black").
+3. "pattern" — Brief note of design traits (e.g., "zigzag", "stripes", "plain").
+4. "garment" — Usually "jersey+shorts" or "jersey".
+5. "type" — Choose "render" ONLY if the asset is an absolute digital 3D vector model graphic on a plain background. Choose "photo" if it is a real physical fabric sample flat-laid on a floor, hung up, or showing organic wrinkles/shadows.
+6. "view" — Label the perspective:
+   - "front": if the chest and main crest are centered.
+   - "back": if highlighting player numbers or rear face.
+   - "collage": if it contains both perspectives side-by-side or combined.
 
-Reply ONLY with a valid JSON object matching this schema:
+Return ONLY a clean JSON schema:
 {"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render", "view": "front"}
 """)
     ]
     raw = gemini_call(parts)
-    raw = raw.strip().strip("```json").strip("```").strip()
+    raw = raw.strip().strip("```json").strip("
+```").strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -214,7 +217,7 @@ def ai_group_images(image_paths: list) -> list:
         log.info(f"  IMAGE_{i}: {d.get('primary_color')}/{d.get('secondary_color')} "
                  f"pattern='{d.get('pattern')}' type='{d.get('type')}'")
 
-    by_index = {d["_index"]: d for d in descriptions}
+        by_index = {d["_index"]: d for d in descriptions}
 
     try:
         groups_idx = match_fingerprints(descriptions)
@@ -222,34 +225,35 @@ def ai_group_images(image_paths: list) -> list:
         log.warning(f"Fingerprint matching failed, falling back to 1 group per image: {e}")
         groups_idx = [[d["_index"]] for d in descriptions]
 
-    # Build final groups with strict priority sorting
+    # Build final groups with inverted priority sorting for Telegram's Grid Engine
     result = []
     for group in groups_idx:
         items = [by_index[i] for i in group if i in by_index]
         if not items:
             continue
         
-        # Define strict positioning sorting function
         def sorting_key(item):
-            g_type = item.get("type", "photo").lower()
-            g_view = item.get("view", "front").lower()
+            g_type = str(item.get("type", "photo")).lower().strip()
+            g_view = str(item.get("view", "front")).lower().strip()
             
-            # Assign weights (Lower score = higher priority / comes first)
-            if g_type == "render":
-                if g_view == "front":   return 0  # 1st: Render Front
-                if g_view == "back":    return 1  # 2nd: Render Back
-                return 2                          # 3rd: Render Other
+            # INVERTED SCALE: Lowest weight values are placed first (Index 0)
+            # This forces the physical product photo to fill Telegram's large layout slot.
+            if g_type == "photo":
+                if g_view == "front":    return 0  # 1st: Real Photo Front (Becomes large cover)
+                if g_view == "collage":  return 1  # 2nd: Real Photo Mixed Composition
+                if g_view == "back":     return 2  # 3rd: Real Photo Back Area
+                return 3                           # 4th: Real Photo Miscellaneous
             else:
-                if g_view == "front":   return 3  # 4th: Photo Front
-                if g_view == "back":    return 4  # 5th: Photo Back
-                return 5                          # 6th: Photo Other
+                if g_view == "front":    return 4  # 5th: Render Mockup Front
+                if g_view == "back":     return 5  # 6th: Render Mockup Back
+                if g_view == "collage":  return 6  # 7th: Render Mixed Collage Split
+                return 7                           # 8th: Render Miscellaneous
 
-        # Sort the items in this product group using our custom priority weights
+        # Sort this kit's images according to the array priority metric
         items_sorted = sorted(items, key=sorting_key)
         
-        # Extract the file paths in the newly sorted order
+        # Save the optimized file paths sequence
         result.append([d["_path"] for d in items_sorted])
-
 
     return result or [image_paths]
 
