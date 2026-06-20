@@ -298,35 +298,43 @@ def generate_description(image_paths: list, cfg: dict) -> str:
 
 # ── Telegram posting ───────────────────────────────────────────────────────────
 async def post_album_to_channel(bot, image_paths: list, caption: str) -> bool:
-    """Post a photo album to the channel."""
-    import aiohttp as _aio
-    base  = f"https://api.telegram.org/bot{BOT_TOKEN}"
-    media = []
-    files = {}
-
-    for i, path in enumerate(image_paths):
-        field = f"photo{i}"
-        files[field] = open(path, "rb")
-        entry = {"type": "photo", "media": f"attach://{field}"}
-        if i == 0:
-            entry["caption"]    = caption
-            entry["parse_mode"] = "HTML"
-        media.append(entry)
-
+    from telegram import InputMediaPhoto
+    
+    # 💡 TELEGRAM GRID HACK:
+    # Telegram only builds the "1 Large Cover + 2 Small Sidekas" layout if there are EXACTLY 3 images.
+    # If there are 4 images, it forces a flat 2x2 square grid. 
+    # Let's slice the array to a maximum of 3 to force the layout you want.
+    layout_paths = image_paths[:3] 
+    
+    media_group = []
+    open_files = []
+    
     try:
-        async with _aio.ClientSession() as session:
-            form = _aio.FormData()
-            form.add_field("chat_id", str(CHANNEL_ID))
-            form.add_field("media",   json.dumps(media))
-            for field, fobj in files.items():
-                form.add_field(field, fobj, filename=Path(fobj.name).name,
-                               content_type="image/jpeg")
-            async with session.post(f"{base}/sendMediaGroup", data=form) as resp:
-                result = await resp.json()
-                return result.get("ok", False)
+        for i, path in enumerate(layout_paths):
+            f = open(path, "rb")
+            open_files.append(f)
+            
+            if i == 0:
+                # The first item in the array becomes the dominant large image and holds the caption
+                media_group.append(
+                    InputMediaPhoto(media=f, caption=caption, parse_mode="HTML")
+                )
+            else:
+                media_group.append(InputMediaPhoto(media=f))
+        
+        # Send the group using the native library
+        await bot.send_media_group(chat_id=CHANNEL_ID, media=media_group)
+        return True
+        
+    except Exception as e:
+        log.error(f"Failed to post album: {e}")
+        return False
+        
     finally:
-        for fobj in files.values():
-            fobj.close()
+        # Always close files to prevent memory leaks
+        for f in open_files:
+            f.close()
+
 
 # ── Extract images from ZIP ────────────────────────────────────────────────────
 def extract_all_images(zip_path: str, dest_dir: str) -> list:
