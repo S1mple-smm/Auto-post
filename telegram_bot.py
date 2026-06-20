@@ -9,6 +9,54 @@ Telegram ZIP Bot
 
 import os, sys, json, asyncio, zipfile, shutil, io, time, logging, re
 from pathlib import Path
+from telegram import Update
+from telegram.ext import ContextTypes
+from telegram.constants import ParseMode
+from telethon import TelegramClient
+
+# ── New MTProto Configuration ────────────────────────────────────────────────
+API_ID   = int(os.environ["TELEGRAM_API_ID"])     # From my.telegram.org
+API_HASH = os.environ["TELEGRAM_API_HASH"]       # From my.telegram.org
+BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+
+# Initialize Telethon client in Bot Login Mode
+# This allows Telethon to use your bot's identity to download files natively
+telethon_client = TelegramClient("bot_session", API_ID, API_HASH)
+
+# ── Updated ZIP Handler ──────────────────────────────────────────────────────
+async def handle_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    message_id = update.message.message_id
+    document = update.message.document
+
+    # Validate that it's a zip file
+    if not document or not document.file_name.endswith('.zip'):
+        await update.message.reply_text("Please send a valid .zip archive.")
+        return
+
+    status_msg = await update.message.reply_text("📥 *Downloading large ZIP file via MTProto...*", parse_mode=ParseMode.MARKDOWN)
+
+    # Create temporary directory for extraction
+    import tempfile
+    tmpdir = tempfile.mkdtemp()
+    zip_path = os.path.join(tmpdir, "uploaded_products.zip")
+
+    try:
+        # CRITICAL FIX: Download the file using Telethon instead of python-telegram-bot
+        # This completely bypasses the 20MB Bot API limit up to 2GB.
+        async with telethon_client:
+            # Fetch the message natively via MTProto using the chat and message ID
+            telethon_msg = await telethon_client.get_messages(chat_id, ids=message_id)
+            
+            # Download the document directly to your local path
+            await telethon_client.download_media(telethon_msg.media, file=zip_path)
+
+        await status_msg.edit_text("📦 *Extracting and analyzing images...*", parse_mode=ParseMode.MARKDOWN)
+        
+        # ... Rest of your processing, unzipping, and ai_group_images logic remains exactly the same ...
+        
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Download failed: {e}")
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
