@@ -145,8 +145,7 @@ Return ONLY a clean JSON schema:
 """)
     ]
     raw = gemini_call(parts)
-    raw = raw.strip().strip("```json").strip("
-```").strip()
+    raw = raw.strip().strip("```json").strip("```").strip()
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -157,6 +156,7 @@ Return ONLY a clean JSON schema:
     data["_index"] = index
     data["_path"]  = path
     return data
+
 
 def match_fingerprints(descriptions: list) -> list:
     """
