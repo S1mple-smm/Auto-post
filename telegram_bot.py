@@ -24,39 +24,117 @@ BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 telethon_client = TelegramClient("bot_session", API_ID, API_HASH)
 
 # ── Updated ZIP Handler ──────────────────────────────────────────────────────
-async def handle_zip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    message_id = update.message.message_id
-    document = update.message.document
-
-    # Validate that it's a zip file
-    if not document or not document.file_name.endswith('.zip'):
-        await update.message.reply_text("Please send a valid .zip archive.")
+async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Main handler: receives ZIP, downloads via MTProto, processes, posts."""
+    if not is_allowed(update.effective_user.id):
+        await update.message.reply_text("⛔ You are not authorized to use this bot.")
         return
 
-    status_msg = await update.message.reply_text("📥 *Downloading large ZIP file via MTProto...*", parse_mode=ParseMode.MARKDOWN)
+    doc = update.message.document
+    if not doc or not doc.file_name.lower().endswith(".zip"):
+        await update.message.reply_text("📎 Please send a ZIP file.")
+        return
 
-    # Create temporary directory for extraction
-    import tempfile
-    tmpdir = tempfile.mkdtemp()
-    zip_path = os.path.join(tmpdir, "uploaded_products.zip")
+    cfg = load_shop_config()
+    if not cfg:
+        await update.message.reply_text("⚠️ Shop config not found! Create shop.json on the server.")
+        return
+
+    remaining = rate_limiter.remaining_today
+    status_msg = await update.message.reply_text(
+        f"📦 Received *{doc.file_name}*\n"
+        f"📊 Gemini quota: {remaining}/{GEMINI_RPD} left today\n\n"
+        f"⏳ Downloading large file directly via MTProto…",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    tmpdir = f"/tmp/poster_{update.message.message_id}"
+    os.makedirs(tmpdir, exist_ok=True)
+    zip_path = os.path.join(tmpdir, doc.file_name)
 
     try:
-        # CRITICAL FIX: Download the file using Telethon instead of python-telegram-bot
-        # This completely bypasses the 20MB Bot API limit up to 2GB.
+        # === THE NEW TELETHON DOWNLOADER ===
+        # This completely ignores the 20MB Bot API limit
         async with telethon_client:
-            # Fetch the message natively via MTProto using the chat and message ID
-            telethon_msg = await telethon_client.get_messages(chat_id, ids=message_id)
-            
-            # Download the document directly to your local path
+            telethon_msg = await telethon_client.get_messages(
+                update.effective_chat.id, 
+                ids=update.message.message_id
+            )
             await telethon_client.download_media(telethon_msg.media, file=zip_path)
 
-        await status_msg.edit_text("📦 *Extracting and analyzing images...*", parse_mode=ParseMode.MARKDOWN)
-        
-        # ... Rest of your processing, unzipping, and ai_group_images logic remains exactly the same ...
-        
+        await status_msg.edit_text(
+            f"📦 *{doc.file_name}* downloaded successfully!\n"
+            f"🤖 Analyzing photos and sorting into albums…",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        # Extract & group
+        all_images = extract_all_images(zip_path, tmpdir)
+        if not all_images:
+            await status_msg.edit_text("❌ No images found in the ZIP file.")
+            return
+
+        # AI grouping 
+        loop = asyncio.get_event_loop()
+        groups = await loop.run_in_executor(None, ai_group_images, all_images)
+
+        total = len(groups)
+        await status_msg.edit_text(
+            f"📦 *{doc.file_name}*\n"
+            f"🖼 Found *{total} product(s)* — starting to post…\n"
+            f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        # Post each group
+        posted = 0
+        failed = 0
+        for i, images in enumerate(groups, 1):
+            try:
+                await status_msg.edit_text(
+                    f"📦 *{doc.file_name}*\n"
+                    f"⏳ Processing product *{i}/{total}* ({len(images)} photos)…",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+
+                # Generate description
+                caption = await loop.run_in_executor(None, generate_description, images, cfg)
+
+                # Post album to channel (Standard PTB is fine for uploading up to 50MB albums)
+                for chunk_start in range(0, len(images), MAX_ALBUM_SIZE):
+                    chunk = images[chunk_start:chunk_start + MAX_ALBUM_SIZE]
+                    ok = await post_album_to_channel(ctx.bot, chunk, caption if chunk_start == 0 else "")
+                    if ok:
+                        posted += 1
+                    else:
+                        failed += 1
+                    await asyncio.sleep(2)
+
+                if i < total:
+                    await asyncio.sleep(12)
+
+            except RuntimeError as e:
+                if "Daily Gemini limit" in str(e):
+                    await status_msg.edit_text(f"⛔ *Daily quota exhausted!*\n{str(e)}", parse_mode=ParseMode.MARKDOWN)
+                    return
+                else:
+                    log.error(f"Product {i} failed: {e}")
+                    failed += 1
+                    continue
+
+        icon = "✅" if failed == 0 else "⚠️"
+        await status_msg.edit_text(
+            f"{icon} *Done!*\n\n"
+            f"📮 Posted: *{posted}* product(s) to channel\n"
+            f"❌ Failed: *{failed}*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
     except Exception as e:
-        await status_msg.edit_text(f"❌ Download failed: {e}")
+        log.exception("Unexpected error")
+        await status_msg.edit_text(f"❌ Unexpected error:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
