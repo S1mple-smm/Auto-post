@@ -115,11 +115,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
 
 def describe_single_image(path: str, index: int) -> dict:
     """
-    Ask Gemini to describe ONE image — focus on VISUAL FINGERPRINT, not team identity.
-    A jersey's back view has no crest, so we rely on colors/pattern/trim instead,
-    which stay consistent between front, back, render, and real photo of the same product.
-    Returns: {"primary_color": str, "secondary_color": str, "pattern": str,
-              "garment": str, "type": "render"|"photo"}
+    Ask Gemini to describe ONE image — focus on VISUAL FINGERPRINT and VIEW orientation.
     """
     with PILImage.open(path) as img:
         img.thumbnail((500, 500))
@@ -130,21 +126,20 @@ def describe_single_image(path: str, index: int) -> dict:
     parts = [
         types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
         types.Part.from_text(text="""
-Look at this single sportswear product image carefully.
-This could be a FRONT view, BACK view, a 3D render, or a real photo of the SAME jersey —
-your job is to describe its visual fingerprint so it can be matched to other images
-of the exact same product, even from a different angle.
+Look at this single sportswear product image carefully. 
+Analyze its visual details so it can be matched with other angles/views of the exact same physical kit.
 
 Identify:
-1. "primary_color" — the dominant base color of the jersey/shorts (e.g. "white", "red", "yellow")
-2. "secondary_color" — the main accent/trim color, if any (e.g. "navy", "black", "none")
-3. "pattern" — short description of any pattern/print/stripes visible (e.g. "plain", "diagonal stripes", "camo texture", "vertical stripes on sleeve")
-4. "garment" — "jersey+shorts" or "jersey" or "shorts" or "other"
-5. "type" — "render" if this is a clean digital/3D mockup or flat studio product shot with plain/no background and NO visible human skin or face;
-   "photo" if this is a real photo of a person wearing it, or real fabric on a hanger/floor with visible texture, wrinkles, or shadows
+1. "primary_color" — dominant base color (e.g., "white", "navy", "red"). Be consistent.
+2. "secondary_color" — main accent/trim color (e.g., "gold", "black", "none").
+3. "pattern" — very brief description of unique patterns, gradients, or stripes (e.g., "subtle geometric", "vertical stripes", "plain").
+4. "garment" — "jersey+shorts", "jersey", "shorts", or "other".
+5. "type" — "render" ONLY if it is a flawless digital 3D mockup, flat vector, or template graphic with a perfectly clean/solid background; 
+   "photo" if it is a real-life physical photo (creases, fabric textures, shadows, hanging on a wall, or worn by a human).
+6. "view" — "front" if showing the chest/front face; "back" if showing player number/name space or back face; "other" if side view or macro close-up.
 
-Reply ONLY with valid JSON, nothing else:
-{"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render"}
+Reply ONLY with a valid JSON object matching this schema:
+{"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render", "view": "front"}
 """)
     ]
     raw = gemini_call(parts)
@@ -154,7 +149,7 @@ Reply ONLY with valid JSON, nothing else:
     except json.JSONDecodeError:
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         data = json.loads(match.group()) if match else {
-            "primary_color": f"unknown_{index}", "secondary_color": "", "pattern": "", "garment": "", "type": "photo"
+            "primary_color": f"unknown_{index}", "secondary_color": "", "pattern": "", "garment": "", "type": "photo", "view": "front"
         }
     data["_index"] = index
     data["_path"]  = path
@@ -227,15 +222,34 @@ def ai_group_images(image_paths: list) -> list:
         log.warning(f"Fingerprint matching failed, falling back to 1 group per image: {e}")
         groups_idx = [[d["_index"]] for d in descriptions]
 
-    # Build final groups: renders first, then photos, preserving original order within each type
+    # Build final groups with strict priority sorting
     result = []
     for group in groups_idx:
         items = [by_index[i] for i in group if i in by_index]
         if not items:
             continue
-        renders = [d["_path"] for d in items if d.get("type") == "render"]
-        photos  = [d["_path"] for d in items if d.get("type") != "render"]
-        result.append(renders + photos)
+        
+        # Define strict positioning sorting function
+        def sorting_key(item):
+            g_type = item.get("type", "photo").lower()
+            g_view = item.get("view", "front").lower()
+            
+            # Assign weights (Lower score = higher priority / comes first)
+            if g_type == "render":
+                if g_view == "front":   return 0  # 1st: Render Front
+                if g_view == "back":    return 1  # 2nd: Render Back
+                return 2                          # 3rd: Render Other
+            else:
+                if g_view == "front":   return 3  # 4th: Photo Front
+                if g_view == "back":    return 4  # 5th: Photo Back
+                return 5                          # 6th: Photo Other
+
+        # Sort the items in this product group using our custom priority weights
+        items_sorted = sorted(items, key=sorting_key)
+        
+        # Extract the file paths in the newly sorted order
+        result.append([d["_path"] for d in items_sorted])
+
 
     return result or [image_paths]
 
