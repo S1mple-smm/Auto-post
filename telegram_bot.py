@@ -115,8 +115,11 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
 
 def describe_single_image(path: str, index: int) -> dict:
     """
-    Ask Gemini to describe ONE image — optimized to handle mixed collages 
-    and prioritize real photos to be the primary cover slot.
+    Ask Gemini to describe ONE image — focus on VISUAL FINGERPRINT, not team identity.
+    A jersey's back view has no crest, so we rely on colors/pattern/trim instead,
+    which stay consistent between front, back, render, and real photo of the same product.
+    Returns: {"primary_color": str, "secondary_color": str, "pattern": str,
+              "garment": str, "type": "render"|"photo"}
     """
     with PILImage.open(path) as img:
         img.thumbnail((500, 500))
@@ -127,21 +130,21 @@ def describe_single_image(path: str, index: int) -> dict:
     parts = [
         types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
         types.Part.from_text(text="""
-Analyze this sports kit item image. Note that this file might be a combination multi-window collage.
+Look at this single sportswear product image carefully.
+This could be a FRONT view, BACK view, a 3D render, or a real photo of the SAME jersey —
+your job is to describe its visual fingerprint so it can be matched to other images
+of the exact same product, even from a different angle.
 
-Identify the following details from the dominant view:
-1. "primary_color" — The main background fabric color (e.g., "blue", "white", "red", "yellow", "green").
-2. "secondary_color" — Accent or collar/sleeve trim colors (e.g., "gold", "navy", "black").
-3. "pattern" — Brief note of design traits (e.g., "zigzag", "stripes", "plain").
-4. "garment" — Usually "jersey+shorts" or "jersey".
-5. "type" — Choose "render" ONLY if the asset is an absolute digital 3D vector model graphic on a plain background. Choose "photo" if it is a real physical fabric sample flat-laid on a floor, hung up, or showing organic wrinkles/shadows.
-6. "view" — Label the perspective:
-   - "front": if the chest and main crest are centered.
-   - "back": if highlighting player numbers or rear face.
-   - "collage": if it contains both perspectives side-by-side or combined.
+Identify:
+1. "primary_color" — the dominant base color of the jersey/shorts (e.g. "white", "red", "yellow")
+2. "secondary_color" — the main accent/trim color, if any (e.g. "navy", "black", "none")
+3. "pattern" — short description of any pattern/print/stripes visible (e.g. "plain", "diagonal stripes", "camo texture", "vertical stripes on sleeve")
+4. "garment" — "jersey+shorts" or "jersey" or "shorts" or "other"
+5. "type" — "render" if this is a clean digital/3D mockup or flat studio product shot with plain/no background and NO visible human skin or face;
+   "photo" if this is a real photo of a person wearing it, or real fabric on a hanger/floor with visible texture, wrinkles, or shadows
 
-Return ONLY a clean JSON schema:
-{"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render", "view": "front"}
+Reply ONLY with valid JSON, nothing else:
+{"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render"}
 """)
     ]
     raw = gemini_call(parts)
@@ -151,12 +154,11 @@ Return ONLY a clean JSON schema:
     except json.JSONDecodeError:
         match = re.search(r'\{.*\}', raw, re.DOTALL)
         data = json.loads(match.group()) if match else {
-            "primary_color": f"unknown_{index}", "secondary_color": "", "pattern": "", "garment": "", "type": "photo", "view": "front"
+            "primary_color": f"unknown_{index}", "secondary_color": "", "pattern": "", "garment": "", "type": "photo"
         }
     data["_index"] = index
     data["_path"]  = path
     return data
-
 
 def match_fingerprints(descriptions: list) -> list:
     """
@@ -217,7 +219,7 @@ def ai_group_images(image_paths: list) -> list:
         log.info(f"  IMAGE_{i}: {d.get('primary_color')}/{d.get('secondary_color')} "
                  f"pattern='{d.get('pattern')}' type='{d.get('type')}'")
 
-        by_index = {d["_index"]: d for d in descriptions}
+    by_index = {d["_index"]: d for d in descriptions}
 
     try:
         groups_idx = match_fingerprints(descriptions)
@@ -225,35 +227,15 @@ def ai_group_images(image_paths: list) -> list:
         log.warning(f"Fingerprint matching failed, falling back to 1 group per image: {e}")
         groups_idx = [[d["_index"]] for d in descriptions]
 
-    # Build final groups with inverted priority sorting for Telegram's Grid Engine
+    # Build final groups: renders first, then photos, preserving original order within each type
     result = []
     for group in groups_idx:
         items = [by_index[i] for i in group if i in by_index]
         if not items:
             continue
-        
-        def sorting_key(item):
-            g_type = str(item.get("type", "photo")).lower().strip()
-            g_view = str(item.get("view", "front")).lower().strip()
-            
-            # INVERTED SCALE: Lowest weight values are placed first (Index 0)
-            # This forces the physical product photo to fill Telegram's large layout slot.
-            if g_type == "photo":
-                if g_view == "front":    return 0  # 1st: Real Photo Front (Becomes large cover)
-                if g_view == "collage":  return 1  # 2nd: Real Photo Mixed Composition
-                if g_view == "back":     return 2  # 3rd: Real Photo Back Area
-                return 3                           # 4th: Real Photo Miscellaneous
-            else:
-                if g_view == "front":    return 4  # 5th: Render Mockup Front
-                if g_view == "back":     return 5  # 6th: Render Mockup Back
-                if g_view == "collage":  return 6  # 7th: Render Mixed Collage Split
-                return 7                           # 8th: Render Miscellaneous
-
-        # Sort this kit's images according to the array priority metric
-        items_sorted = sorted(items, key=sorting_key)
-        
-        # Save the optimized file paths sequence
-        result.append([d["_path"] for d in items_sorted])
+        renders = [d["_path"] for d in items if d.get("type") == "render"]
+        photos  = [d["_path"] for d in items if d.get("type") != "render"]
+        result.append(renders + photos)
 
     return result or [image_paths]
 
@@ -298,43 +280,35 @@ def generate_description(image_paths: list, cfg: dict) -> str:
 
 # ── Telegram posting ───────────────────────────────────────────────────────────
 async def post_album_to_channel(bot, image_paths: list, caption: str) -> bool:
-    from telegram import InputMediaPhoto
-    
-    # 💡 TELEGRAM GRID HACK:
-    # Telegram only builds the "1 Large Cover + 2 Small Sidekas" layout if there are EXACTLY 3 images.
-    # If there are 4 images, it forces a flat 2x2 square grid. 
-    # Let's slice the array to a maximum of 3 to force the layout you want.
-    layout_paths = image_paths[:3] 
-    
-    media_group = []
-    open_files = []
-    
-    try:
-        for i, path in enumerate(layout_paths):
-            f = open(path, "rb")
-            open_files.append(f)
-            
-            if i == 0:
-                # The first item in the array becomes the dominant large image and holds the caption
-                media_group.append(
-                    InputMediaPhoto(media=f, caption=caption, parse_mode="HTML")
-                )
-            else:
-                media_group.append(InputMediaPhoto(media=f))
-        
-        # Send the group using the native library
-        await bot.send_media_group(chat_id=CHANNEL_ID, media=media_group)
-        return True
-        
-    except Exception as e:
-        log.error(f"Failed to post album: {e}")
-        return False
-        
-    finally:
-        # Always close files to prevent memory leaks
-        for f in open_files:
-            f.close()
+    """Post a photo album to the channel."""
+    import aiohttp as _aio
+    base  = f"https://api.telegram.org/bot{BOT_TOKEN}"
+    media = []
+    files = {}
 
+    for i, path in enumerate(image_paths):
+        field = f"photo{i}"
+        files[field] = open(path, "rb")
+        entry = {"type": "photo", "media": f"attach://{field}"}
+        if i == 0:
+            entry["caption"]    = caption
+            entry["parse_mode"] = "HTML"
+        media.append(entry)
+
+    try:
+        async with _aio.ClientSession() as session:
+            form = _aio.FormData()
+            form.add_field("chat_id", str(CHANNEL_ID))
+            form.add_field("media",   json.dumps(media))
+            for field, fobj in files.items():
+                form.add_field(field, fobj, filename=Path(fobj.name).name,
+                               content_type="image/jpeg")
+            async with session.post(f"{base}/sendMediaGroup", data=form) as resp:
+                result = await resp.json()
+                return result.get("ok", False)
+    finally:
+        for fobj in files.values():
+            fobj.close()
 
 # ── Extract images from ZIP ────────────────────────────────────────────────────
 def extract_all_images(zip_path: str, dest_dir: str) -> list:
