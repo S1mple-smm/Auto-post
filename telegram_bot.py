@@ -89,8 +89,9 @@ def load_shop_config() -> dict:
     return {}
 
 # ── Gemini helpers ─────────────────────────────────────────────────────────────
-def load_image_bytes(path: str) -> bytes:
+def load_image_bytes(path: str, max_size=(800, 800)) -> bytes:
     with PILImage.open(path) as img:
+        img.thumbnail(max_size)
         buf = io.BytesIO()
         img.convert("RGB").save(buf, format="JPEG", quality=85)
         return buf.getvalue()
@@ -113,129 +114,60 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
                 raise
     raise RuntimeError("Exhausted Gemini retries")
 
-def describe_single_image(path: str, index: int) -> dict:
-    """
-    Ask Gemini to describe ONE image — focus on VISUAL FINGERPRINT, not team identity.
-    A jersey's back view has no crest, so we rely on colors/pattern/trim instead,
-    which stay consistent between front, back, render, and real photo of the same product.
-    Returns: {"primary_color": str, "secondary_color": str, "pattern": str,
-              "garment": str, "type": "render"|"photo"}
-    """
-    with PILImage.open(path) as img:
-        img.thumbnail((500, 500))
-        buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=75)
-        img_bytes = buf.getvalue()
-
-    parts = [
-        types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
-        types.Part.from_text(text="""
-Look at this single sportswear/footwear product image carefully.
-Identify its visual fingerprint so it can be matched to other images of the exact same product from different angles.
-
-Identify:
-1. "primary_color" — the dominant base color of the item
-2. "secondary_color" — the main accent, trim, or sole color
-3. "pattern" — short description of any pattern, texture, or design
-4. "garment" — e.g., "football boots", "sneakers", "jersey", "shorts", or "equipment"
-5. "type" — "render" (clean 3D/studio mockup) or "photo" (real photo with shadows, backgrounds, or people)
-
-Reply ONLY with valid JSON, nothing else:
-{"primary_color": "...", "secondary_color": "...", "pattern": "...", "garment": "...", "type": "render"}
-""")
-    ]
-
-    raw = gemini_call(parts)
-    raw = raw.strip().strip("```json").strip("```").strip()
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        data = json.loads(match.group()) if match else {
-            "primary_color": f"unknown_{index}", "secondary_color": "", "pattern": "", "garment": "", "type": "photo"
-        }
-    data["_index"] = index
-    data["_path"]  = path
-    return data
-
-def match_fingerprints(descriptions: list) -> list:
-    """
-    Step 2: send all the lightweight text fingerprints (no images) to Gemini in ONE
-    cheap text-only call, and ask it to cluster which indices belong to the same product.
-    This catches cases where front/back/render/photo of the same kit got slightly
-    different color/pattern wording in step 1.
-    """
-    fingerprint_lines = []
-    for d in descriptions:
-        fingerprint_lines.append(
-            f"{d['_index']}: primary={d.get('primary_color')}, secondary={d.get('secondary_color')}, "
-            f"pattern={d.get('pattern')}, garment={d.get('garment')}, type={d.get('type')}"
-        )
-    listing = "\n".join(fingerprint_lines)
-
-    prompt = f"""Below is a list of product image fingerprints, one per line, format:
-INDEX: primary=color, secondary=color, pattern=desc, garment=type, type=render/photo
-
-{listing}
-
-Cluster these indices into groups — each group = images of the SAME physical product
-(same color combo + same pattern), regardless of whether they are front/back/render/photo.
-Minor wording differences in pattern description can still mean the same product if colors match closely.
-Different primary OR secondary color = different product.
-
-Reply ONLY with a JSON array of groups of indices, e.g. [[0,1,2],[3,4]]
-No explanation, no markdown — ONLY the JSON array.
-"""
-    raw = gemini_call([types.Part.from_text(text=prompt)])
-    raw = raw.strip().strip("```json").strip("```").strip()
-    try:
-        groups_idx = json.loads(raw)
-    except json.JSONDecodeError:
-        match = re.search(r'\[\s*\[.*?\]\s*\]', raw, re.DOTALL)
-        groups_idx = json.loads(match.group()) if match else None
-
-    if not groups_idx:
-        # Fallback: each image its own group
-        return [[d["_index"]] for d in descriptions]
-    return groups_idx
 
 def ai_group_images(image_paths: list) -> list:
     """
-    Step 1: describe each image's visual fingerprint individually (reliable for lite models).
-    Step 2: cluster fingerprints into product groups via one cheap text-only call.
-    Step 3: sort each group renders-first, photos-last.
+    Passes all images to Gemini simultaneously for highly accurate 
+    visual grouping and sorting.
     """
-    descriptions = []
+    parts = []
     for i, path in enumerate(image_paths):
-        try:
-            d = describe_single_image(path, i)
-        except Exception as e:
-            log.warning(f"Failed to describe image {i}: {e}")
-            d = {"primary_color": f"unknown_{i}", "secondary_color": "", "pattern": "",
-                 "garment": "", "type": "photo", "_index": i, "_path": path}
-        descriptions.append(d)
-        log.info(f"  IMAGE_{i}: {d.get('primary_color')}/{d.get('secondary_color')} "
-                 f"pattern='{d.get('pattern')}' type='{d.get('type')}'")
-
-    by_index = {d["_index"]: d for d in descriptions}
-
+        parts.append(types.Part.from_text(text=f"Image Index: {i}"))
+        parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
+        
+    prompt = """
+    You are an expert sports apparel merchandiser. Look at all the provided images.
+    Your task is to group the images that show the EXACT same product (same team, same season, identical crest/logos, and colors). 
+    Be extremely careful with white or similar-colored kits—look closely at the crests, collar trims, and side panels to differentiate them.
+    
+    For each group you find, you MUST sort the image indices in this specific order:
+    1. Front View (clean render/studio mockup)
+    2. Back View (clean render/studio mockup)
+    3. Real Photos (photos with shadows, wrinkles, or on a person/mannequin)
+    
+    Return ONLY a valid JSON array of arrays containing the image indices.
+    Example: [[0, 2, 5], [1, 3], [4]]
+    Do not include any markdown, backticks, or explanations. Just the JSON array.
+    """
+    parts.append(types.Part.from_text(text=prompt))
+    
+    log.info(f"Sending {len(image_paths)} images to Gemini for visual clustering...")
+    
     try:
-        groups_idx = match_fingerprints(descriptions)
+        raw = gemini_call(parts)
+        raw = raw.strip().strip("```json").strip("```").strip()
+        
+        # Use regex to safely extract the JSON array if Gemini includes extra text
+        import re
+        match = re.search(r'\[\s*\[.*?\]\s*\]', raw, re.DOTALL)
+        if match:
+            groups_idx = json.loads(match.group())
+        else:
+            groups_idx = json.loads(raw)
+            
     except Exception as e:
-        log.warning(f"Fingerprint matching failed, falling back to 1 group per image: {e}")
-        groups_idx = [[d["_index"]] for d in descriptions]
-
-    # Build final groups: renders first, then photos, preserving original order within each type
+        log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
+        return [[p] for p in image_paths]
+        
+    # Map indices back to file paths and filter out invalid indices
     result = []
     for group in groups_idx:
-        items = [by_index[i] for i in group if i in by_index]
-        if not items:
-            continue
-        renders = [d["_path"] for d in items if d.get("type") == "render"]
-        photos  = [d["_path"] for d in items if d.get("type") != "render"]
-        result.append(renders + photos)
-
+        valid_group = [image_paths[i] for i in group if isinstance(i, int) and i < len(image_paths)]
+        if valid_group:
+            result.append(valid_group)
+            
     return result or [image_paths]
+
 
 def build_caption_prompt(cfg: dict) -> str:
     lang_map  = {"ru": "Russian", "uz": "Uzbek", "en": "English"}
@@ -250,12 +182,12 @@ def build_caption_prompt(cfg: dict) -> str:
     sizes     = cfg.get("sizes", "38, 39, 40, 41, 42, 43, 44, 45") 
 
     example = (
-        f"Phantom 6 Superfly:\n"
-        f"⚽Назначение: Идеально подходит для футбола и интенсивных тренировок.\n"
+        f"Футбольня форма клуба/сборной:\n"
+        f"⚽Многофункциональная: Идеально подходит для футбола бега и интенсивных тренировок.\n"
         f"📐Размеры: В наличии размеры {sizes}.\n"
-        f"🧵Материал: Высокотехнологичные синтетические материалы.\n"
-        f"⚡Особенности: Превосходное сцепление и контроль мяча.\n"
-        f"👟Комфорт: Плотная и удобная посадка.\n"
+        f"🧵Материал:  Легкий и дышащий полиэстер\n"
+        f"💡Стиль: Спортивный с длинным/коротким рукавом.\n"
+        f"👕Комфорт: Свободная и удобная посадка для удобства в движении.\n"
         f"🚚Доставка осуществляется в течении {delivery}\n"
         f"💰{price}\n\n"
         f"{uzum_line}{tg_line}{admin}"
@@ -264,9 +196,9 @@ def build_caption_prompt(cfg: dict) -> str:
         f"You are a product copywriter for a sportswear shop.\n"
         f"Look at the product image(s) and write a Telegram post in {lang} "
         f"EXACTLY following this style:\n\n{example}\n\nRules:\n"
-        f"- First line: ONLY the model name + colon. DO NOT use brand names in the title or description.\n"
+        f"- First line: ONLY the model name + color. DO NOT use brand names in the title or description.\n"
         f"- Emoji bullets for each feature\n"
-        f"- Include: purpose, sizes ({sizes}), material, features, comfort, delivery ({delivery}), price ({price})\n"
+        f"- Include: purpose, sizes ({sizes}), material, style, comfort, delivery ({delivery}), price ({price})\n"
         f"- End with shop links and admin tag exactly as shown\n"
         f"- Output ONLY the post text, no markdown, no backticks"
     )
