@@ -117,8 +117,8 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
 
 def ai_group_images(image_paths: list) -> list:
     """
-    Passes all images to Gemini simultaneously for highly accurate 
-    visual grouping and sorting, with strict fallback logic.
+    Passes all images to Gemini simultaneously for visual grouping.
+    Uses strict JSON keys to guarantee the final sorting order in Python.
     """
     parts = []
     for i, path in enumerate(image_paths):
@@ -127,51 +127,73 @@ def ai_group_images(image_paths: list) -> list:
         
     prompt = """
     You are an expert sports apparel merchandiser. Look at all the provided images.
-    Your task is to group the images that show the EXACT same product (same team, same season, identical crest/logos, and colors). 
-    Be extremely careful with white or similar-colored kits—look closely at the crests, collar trims, and side panels to differentiate them.
+    Group the images that show the EXACT same product (same team, same season, identical crest/logos, and colors). 
     
-    CRITICAL - DOUBLE CHECK YOUR WORK:
-    1. Verify that no two different products are mixed in the same group.
-    2. Verify the positions of the images in each group perfectly follow the sorting rules below.
-
-    SORTING RULES FOR EACH GROUP:
-    1. Front View (clean render/studio mockup)
-    2. Back View (clean render/studio mockup)
-    3. IF NO 3D RENDER EXISTS: Position 1 MUST be the Front View (Real Photo) and Position 2 MUST be the Back View (Real Photo).
-    4. Any remaining real photos (close-ups, angled shots, folded kits, shadows, wrinkles) go last.
+    For each product group, identify the image indices for:
+    - "front_view": The main front-facing clean 3D render/studio mockup. If none exists, pick the best front-facing real photo.
+    - "back_view": The back-facing clean 3D render/studio mockup. If none exists, pick the best back-facing real photo. (Use null if there is no back view).
+    - "other_photos": An array of any remaining images for this product (real photos, close-ups, angled shots, shadows, etc.).
     
-    Return ONLY a valid JSON array of arrays containing the image indices.
-    Example: [[0, 2, 5], [1, 3], [4]]
+    Return ONLY a valid JSON array of objects. Example:
+    [
+      {
+        "front_view": 2,
+        "back_view": 5,
+        "other_photos": [0, 1]
+      },
+      {
+        "front_view": 3,
+        "back_view": null,
+        "other_photos": [4]
+      }
+    ]
     Do not include any markdown, backticks, or explanations. Just the JSON array.
     """
     parts.append(types.Part.from_text(text=prompt))
     
-    log.info(f"Sending {len(image_paths)} images to Gemini for visual clustering and sorting...")
+    log.info(f"Sending {len(image_paths)} images to Gemini for structural clustering...")
     
     try:
         raw = gemini_call(parts)
         raw = raw.strip().strip("```json").strip("```").strip()
         
-        # Use regex to safely extract the JSON array if Gemini includes extra text
+        # Safely extract the JSON array of objects
         import re
-        match = re.search(r'\[\s*\[.*?\]\s*\]', raw, re.DOTALL)
+        match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
         if match:
-            groups_idx = json.loads(match.group())
+            structured_groups = json.loads(match.group())
         else:
-            groups_idx = json.loads(raw)
+            structured_groups = json.loads(raw)
             
     except Exception as e:
         log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
         return [[p] for p in image_paths]
         
-    # Map indices back to file paths and filter out invalid indices
+    # Map indices back to file paths enforcing strict Python sorting
     result = []
-    for group in groups_idx:
-        valid_group = [image_paths[i] for i in group if isinstance(i, int) and i < len(image_paths)]
-        if valid_group:
-            result.append(valid_group)
+    for group in structured_groups:
+        current_group_paths = []
+        
+        # 1. Force Front View to absolute position 0
+        front_idx = group.get("front_view")
+        if isinstance(front_idx, int) and front_idx < len(image_paths):
+            current_group_paths.append(image_paths[front_idx])
+            
+        # 2. Force Back View to absolute position 1
+        back_idx = group.get("back_view")
+        if isinstance(back_idx, int) and back_idx < len(image_paths) and back_idx != front_idx:
+            current_group_paths.append(image_paths[back_idx])
+            
+        # 3. Add all remaining photos last
+        for other_idx in group.get("other_photos", []):
+            if isinstance(other_idx, int) and other_idx < len(image_paths) and other_idx not in (front_idx, back_idx):
+                current_group_paths.append(image_paths[other_idx])
+                
+        if current_group_paths:
+            result.append(current_group_paths)
             
     return result or [image_paths]
+
 
 def build_caption_prompt(cfg: dict) -> str:
     lang_map  = {"ru": "Russian", "uz": "Uzbek", "en": "English"}
