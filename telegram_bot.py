@@ -241,7 +241,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash-lite-preview-06-17", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -348,7 +348,83 @@ def ai_group_images(image_paths: list) -> list:
             
     return result or [image_paths]
 
-def build_caption_prompt(cfg: dict) -> str:
+def detect_product_category(image_paths: list) -> str:
+    """
+    Ask Gemini what TYPE of product this group is, so the caption can use the
+    right wording/sizes (jersey vs boots vs other). One cheap call per group.
+    Returns one of: "jersey", "boots", "other"
+    """
+    parts = []
+    for path in image_paths[:3]:
+        parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
+    parts.append(types.Part.from_text(text="""
+Look at this product image. What category of sportswear product is it?
+
+Reply with ONLY one word, no punctuation, no explanation:
+- "jersey" if it's a football/sports shirt, kit, or jersey+shorts set (worn on the torso)
+- "boots" if it's football boots/cleats/sneakers (worn on the feet)
+- "other" if it's anything else (gloves, balls, bags, accessories, etc.)
+"""))
+    try:
+        raw = gemini_call(parts).strip().lower()
+        raw = re.sub(r'[^a-z]', '', raw)
+        if raw in ("jersey", "boots", "other"):
+            return raw
+    except Exception as e:
+        log.warning(f"Category detection failed: {e}")
+    return "jersey"  # safe default — matches original behaviour
+
+# ── Per-category caption profiles ──────────────────────────────────────────────
+# Each profile defines the example structure Gemini should mimic for that
+# product type. "sizes_key" looks up the right size list from shop.json,
+# falling back to "sizes" for backward compatibility with existing configs.
+CATEGORY_PROFILES = {
+    "jersey": {
+        "sizes_key": "sizes",
+        "default_sizes": "S, M, L, XL, 2XL",
+        "example": (
+            "Футбольня форма клуба/сборной:\n"
+            "⚽Многофункциональная: Идеально подходит для футбола бега и интенсивных тренировок.\n"
+            "📐Размеры: В наличии размеры {sizes}.\n"
+            "🧵Материал: Легкий и дышащий полиэстер\n"
+            "💡Стиль: Спортивный с длинным/коротким рукавом.\n"
+            "👕Комфорт: Свободная и удобная посадка для удобства в движении.\n"
+            "🚚Доставка осуществляется в течении {delivery}\n"
+            "💰{price}\n\n"
+            "{uzum_line}{tg_line}{admin}"
+        ),
+    },
+    "boots": {
+        "sizes_key": "shoe_sizes",
+        "default_sizes": "38, 39, 40, 41, 42, 43, 44, 45",
+        "example": (
+            "Футбольные бутсы:\n"
+            "⚽Многофункциональные: Идеально подходят для игры на натуральном и искусственном газоне.\n"
+            "📐Размеры: В наличии размеры {sizes}.\n"
+            "🧵Материал: Прочный и легкий верх, обеспечивающий контроль мяча.\n"
+            "💡Стиль: Обтекаемый дизайн, эластичный язычок, мягкий воротник.\n"
+            "👟Комфорт: Плотная посадка для уверенного контроля на поле.\n"
+            "🚚Доставка осуществляется в течении {delivery}\n"
+            "💰{price}\n\n"
+            "{uzum_line}{tg_line}{admin}"
+        ),
+    },
+    "other": {
+        "sizes_key": "sizes",
+        "default_sizes": "Универсальный",
+        "example": (
+            "Спортивный аксессуар:\n"
+            "⚽Многофункциональный: Идеально подходит для тренировок и игр.\n"
+            "📐Размеры: {sizes}.\n"
+            "🧵Материал: Качественные материалы.\n"
+            "🚚Доставка осуществляется в течении {delivery}\n"
+            "💰{price}\n\n"
+            "{uzum_line}{tg_line}{admin}"
+        ),
+    },
+}
+
+def build_caption_prompt(cfg: dict, category: str = "jersey") -> str:
     lang_map  = {"ru": "Russian", "uz": "Uzbek", "en": "English"}
     lang      = lang_map.get(cfg.get("language", "ru"), "Russian")
     uzum_line = f"Наш магазин на Узум:\n{cfg['uzum_link']}\n" if cfg.get("uzum_link") else ""
@@ -356,21 +432,15 @@ def build_caption_prompt(cfg: dict) -> str:
     admin     = cfg.get("admin_tag", "")
     price     = cfg.get("price", "")
     delivery  = cfg.get("delivery", "")
-    
-    # Defaults strictly to your required footwear sizes
-    sizes     = cfg.get("sizes", "38, 39, 40, 41, 42, 43, 44, 45") 
 
-    example = (
-        f"Футбольня форма клуба/сборной:\n"
-        f"⚽Многофункциональная: Идеально подходит для футбола бега и интенсивных тренировок.\n"
-        f"📐Размеры: В наличии размеры {sizes}.\n"
-        f"🧵Материал:  Легкий и дышащий полиэстер\n"
-        f"💡Стиль: Спортивный с длинным/коротким рукавом.\n"
-        f"👕Комфорт: Свободная и удобная посадка для удобства в движении.\n"
-        f"🚚Доставка осуществляется в течении {delivery}\n"
-        f"💰{price}\n\n"
-        f"{uzum_line}{tg_line}{admin}"
+    profile = CATEGORY_PROFILES.get(category, CATEGORY_PROFILES["jersey"])
+    sizes   = cfg.get(profile["sizes_key"]) or cfg.get("sizes") or profile["default_sizes"]
+
+    example = profile["example"].format(
+        sizes=sizes, delivery=delivery, price=price,
+        uzum_line=uzum_line, tg_line=tg_line, admin=admin
     )
+
     return (
         f"You are a product copywriter for a sportswear shop.\n"
         f"Look at the product image(s) and write a Telegram post in {lang} "
@@ -378,16 +448,19 @@ def build_caption_prompt(cfg: dict) -> str:
         f"- First line: ONLY the model name + color. DO NOT use brand names in the title or description.\n"
         f"- Emoji bullets for each feature\n"
         f"- Include: purpose, sizes ({sizes}), material, style, comfort, delivery ({delivery}), price ({price})\n"
+        f"- Use wording appropriate for this exact product type — do not call boots a 'jersey' or mention sleeves on footwear, etc.\n"
         f"- End with shop links and admin tag exactly as shown\n"
         f"- Output ONLY the post text, no markdown, no backticks"
     )
 
 
 def generate_description(image_paths: list, cfg: dict) -> str:
+    category = detect_product_category(image_paths)
+    log.info(f"  Detected category: {category}")
     parts = []
     for path in image_paths[:4]:
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-    parts.append(types.Part.from_text(text=build_caption_prompt(cfg)))
+    parts.append(types.Part.from_text(text=build_caption_prompt(cfg, category)))
     return gemini_call(parts)
 
 # ── Telegram posting ───────────────────────────────────────────────────────────
