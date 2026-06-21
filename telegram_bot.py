@@ -253,8 +253,23 @@ def ai_group_images(image_paths: list) -> list:
         
     prompt = """
     You are an expert sports apparel merchandiser. Look at all the provided images.
-    Group the images that show the EXACT same product (same team, same colors). 
-    
+
+    Group the images that show the EXACT same physical product.
+
+    COLOR IS THE MOST IMPORTANT SIGNAL — READ THIS CAREFULLY:
+    - Compare the DOMINANT jersey color of each image first, before anything else.
+    - If two images have a clearly different dominant color (e.g. one is green, another is yellow;
+      one is white, another is red) they are ALWAYS DIFFERENT PRODUCTS — put them in DIFFERENT groups,
+      even if both show the same brand logo (e.g. both have an Adidas logo), same generic style,
+      or no visible team crest at all.
+    - A visible brand logo (Adidas/Nike/Puma) alone is NEVER enough to group two images together.
+      Brand logos repeat across many different unrelated products.
+    - Only group images together if you are confident they are PHOTOS OF THE SAME PHYSICAL ITEM —
+      same color, same trim/accent color, same pattern — just from a different angle or a
+      render vs a real photo of that same item.
+    - If you are not sure two images are the same product, DO NOT group them together.
+      It is much better to create an extra separate group than to wrongly merge two different products.
+
     CRITICAL SORTING RULES:
     You must distinguish between "3D Renders" and "Real Photos" based on these visual clues:
     - 3D Renders: Have a pure white background, stand upright (ghost mannequin), and often have the "KOS" logo in the corner.
