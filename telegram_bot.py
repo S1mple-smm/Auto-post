@@ -42,7 +42,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     remaining = rate_limiter.remaining_today
     status_msg = await update.message.reply_text(
-        f"📦 Received *{doc.file_name}*\n"
+        f"📦 Received *{escape_md(doc.file_name)}*\n"
         f"📊 Gemini quota: {remaining}/{GEMINI_RPD} left today\n\n"
         f"⏳ Downloading large file directly via MTProto…",
         parse_mode=ParseMode.MARKDOWN
@@ -63,7 +63,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await telethon_client.download_media(telethon_msg.media, file=zip_path)
 
         await status_msg.edit_text(
-            f"📦 *{doc.file_name}* downloaded successfully!\n"
+            f"📦 *{escape_md(doc.file_name)}* downloaded successfully!\n"
             f"🤖 Analyzing photos and sorting into albums…",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -80,7 +80,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         total = len(groups)
         await status_msg.edit_text(
-            f"📦 *{doc.file_name}*\n"
+            f"📦 *{escape_md(doc.file_name)}*\n"
             f"🖼 Found *{total} product(s)* — starting to post…\n"
             f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left",
             parse_mode=ParseMode.MARKDOWN
@@ -92,7 +92,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for i, images in enumerate(groups, 1):
             try:
                 await status_msg.edit_text(
-                    f"📦 *{doc.file_name}*\n"
+                    f"📦 *{escape_md(doc.file_name)}*\n"
                     f"⏳ Processing product *{i}/{total}* ({len(images)} photos)…",
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -208,6 +208,18 @@ class RateLimiter:
 rate_limiter = RateLimiter(GEMINI_RPM, GEMINI_RPD)
 
 # ── Shop config ────────────────────────────────────────────────────────────────
+def escape_md(text: str) -> str:
+    """
+    Escape special characters for Telegram's legacy Markdown parser so that
+    user-controlled or AI-generated text (filenames, template names, etc.)
+    can never break message parsing with 'can't find end of the entity' errors.
+    """
+    if not text:
+        return text
+    for ch in ("_", "*", "`", "["):
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
 def load_shop_config() -> dict:
     if os.path.exists(SHOP_CONFIG_FILE):
         with open(SHOP_CONFIG_FILE, encoding="utf-8") as f:
@@ -475,16 +487,41 @@ def generate_description(image_paths: list, cfg: dict) -> str:
 
 # ── Telegram posting ───────────────────────────────────────────────────────────
 async def post_album_to_channel(bot, image_paths: list, caption: str):
-    """Post a photo album to the channel. Returns (ok: bool, error_message: str)."""
+    """
+    Post photo(s) to the channel. Returns (ok: bool, error_message: str).
+    Telegram's sendMediaGroup requires 2-10 items — a single photo must use
+    sendPhoto instead, or Telegram rejects the whole request.
+    """
     import aiohttp as _aio
     import html as _html
-    base  = f"https://api.telegram.org/bot{BOT_TOKEN}"
-    media = []
-    files = {}
+    base = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
     # Escape HTML special chars so stray '<', '>', '&' in AI-generated text
     # (e.g. "2-3 < 5 дня") can't break Telegram's HTML parser.
     safe_caption = _html.escape(caption, quote=False) if caption else caption
+
+    if len(image_paths) == 1:
+        # Single photo — use sendPhoto, not sendMediaGroup
+        path = image_paths[0]
+        try:
+            with open(path, "rb") as f:
+                async with _aio.ClientSession() as session:
+                    form = _aio.FormData()
+                    form.add_field("chat_id", str(CHANNEL_ID))
+                    if safe_caption:
+                        form.add_field("caption", safe_caption)
+                        form.add_field("parse_mode", "HTML")
+                    form.add_field("photo", f, filename=Path(path).name, content_type="image/jpeg")
+                    async with session.post(f"{base}/sendPhoto", data=form) as resp:
+                        result = await resp.json()
+                        if result.get("ok"):
+                            return True, ""
+                        return False, result.get("description", "Unknown Telegram API error")
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    media = []
+    files = {}
 
     for i, path in enumerate(image_paths):
         field = f"photo{i}"
@@ -599,7 +636,7 @@ async def cmd_newtemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     templates[name] = body
     save_templates(templates)
     await update.message.reply_text(
-        f"✅ Template saved as *{name}*\n\n{body}",
+        f"✅ Template saved as *{escape_md(name)}*\n\n{escape_md(body)}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -613,7 +650,7 @@ async def cmd_templates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
         return
-    lines = [f"• *{name}*\n  {body[:80]}{'…' if len(body) > 80 else ''}"
+    lines = [f"• *{escape_md(name)}*\n  {escape_md(body[:80])}{'…' if len(body) > 80 else ''}"
              for name, body in templates.items()]
     await update.message.reply_text(
         "📋 *Saved templates:*\n\n" + "\n\n".join(lines),
@@ -626,11 +663,11 @@ async def cmd_deltemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.partition(" ")[2].strip()
     templates = load_templates()
     if name not in templates:
-        await update.message.reply_text(f"⚠️ No template named *{name}* found.", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(f"⚠️ No template named *{escape_md(name)}* found.", parse_mode=ParseMode.MARKDOWN)
         return
     del templates[name]
     save_templates(templates)
-    await update.message.reply_text(f"🗑 Deleted template *{name}*", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"🗑 Deleted template *{escape_md(name)}*", parse_mode=ParseMode.MARKDOWN)
 
 async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Main handler: receives ZIP, processes, posts to channel."""
@@ -653,7 +690,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     remaining = rate_limiter.remaining_today
     status_msg = await update.message.reply_text(
-        f"📦 Received *{doc.file_name}*\n"
+        f"📦 Received *{escape_md(doc.file_name)}*\n"
         f"📊 Gemini quota: {remaining}/{GEMINI_RPD} left today\n\n"
         f"⏳ Downloading…",
         parse_mode=ParseMode.MARKDOWN
@@ -669,7 +706,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await tg_file.download_to_drive(zip_path)
 
         await status_msg.edit_text(
-            f"📦 *{doc.file_name}* downloaded\n"
+            f"📦 *{escape_md(doc.file_name)}* downloaded\n"
             f"🤖 Analysing each photo individually (team/color/type)…",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -707,7 +744,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         }
 
         await status_msg.edit_text(
-            f"📦 *{doc.file_name}*\n"
+            f"📦 *{escape_md(doc.file_name)}*\n"
             f"🖼 Found *{total} product(s)* (photos per product: {group_sizes})\n\n"
             f"Choose a description style to apply to *all {total} products* in this batch:",
             parse_mode=ParseMode.MARKDOWN,
@@ -720,8 +757,8 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tmpl_text = templates.get(tmpl_name, "") if tmpl_name != "__none__" else ""
 
         await status_msg.edit_text(
-            f"📦 *{doc.file_name}*\n"
-            f"🖼 *{total} product(s)* — style: *{tmpl_name if tmpl_name != '__none__' else 'No template'}*\n"
+            f"📦 *{escape_md(doc.file_name)}*\n"
+            f"🖼 *{total} product(s)* — style: *{escape_md(tmpl_name) if tmpl_name != '__none__' else 'No template'}*\n"
             f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left\n\n"
             f"⏳ Starting to post…",
             parse_mode=ParseMode.MARKDOWN
@@ -735,7 +772,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for i, images in enumerate(groups, 1):
             try:
                 await status_msg.edit_text(
-                    f"📦 *{doc.file_name}*\n"
+                    f"📦 *{escape_md(doc.file_name)}*\n"
                     f"⏳ Processing product *{i}/{total}* ({len(images)} photos)…\n"
                     f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left",
                     parse_mode=ParseMode.MARKDOWN
@@ -802,13 +839,14 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await status_msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
 
         # Send the actual error reasons as a separate message so failures are never silent
+        # (plain text, no parse_mode — raw API error text could contain Markdown special chars)
         if error_details:
-            error_text = "🔍 *Failure details:*\n\n" + "\n\n".join(
+            error_text = "🔍 Failure details:\n\n" + "\n\n".join(
                 f"• {d[:300]}" for d in error_details
             )
             if len(error_text) > 4000:
                 error_text = error_text[:4000] + "…"
-            await update.message.reply_text(error_text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(error_text)
 
     except Exception as e:
         log.exception("Unexpected error")
