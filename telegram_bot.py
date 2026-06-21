@@ -477,16 +477,21 @@ def generate_description(image_paths: list, cfg: dict) -> str:
 async def post_album_to_channel(bot, image_paths: list, caption: str):
     """Post a photo album to the channel. Returns (ok: bool, error_message: str)."""
     import aiohttp as _aio
+    import html as _html
     base  = f"https://api.telegram.org/bot{BOT_TOKEN}"
     media = []
     files = {}
+
+    # Escape HTML special chars so stray '<', '>', '&' in AI-generated text
+    # (e.g. "2-3 < 5 дня") can't break Telegram's HTML parser.
+    safe_caption = _html.escape(caption, quote=False) if caption else caption
 
     for i, path in enumerate(image_paths):
         field = f"photo{i}"
         files[field] = open(path, "rb")
         entry = {"type": "photo", "media": f"attach://{field}"}
         if i == 0:
-            entry["caption"]    = caption
+            entry["caption"]    = safe_caption
             entry["parse_mode"] = "HTML"
         media.append(entry)
 
