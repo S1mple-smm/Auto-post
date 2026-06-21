@@ -729,7 +729,7 @@ def main():
     if not load_shop_config():
         log.warning("⚠️  shop.json not found — bot will warn users until it's created.")
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("quota", cmd_quota))
     app.add_handler(CommandHandler("shop",  cmd_shop))
