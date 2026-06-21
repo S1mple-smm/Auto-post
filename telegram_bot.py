@@ -241,7 +241,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash-lite-preview-06-17", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -258,6 +258,9 @@ def ai_group_images(image_paths: list) -> list:
     """
     Passes all images to Gemini simultaneously for visual grouping.
     Uses strict JSON keys and explicit visual cues to guarantee sorting order.
+    Guarantees every input image ends up in exactly one output group —
+    any image Gemini doesn't explicitly place gets appended as its own group
+    instead of being silently dropped.
     """
     parts = []
     for i, path in enumerate(image_paths):
@@ -270,29 +273,28 @@ def ai_group_images(image_paths: list) -> list:
     Group the images that show the EXACT same physical product.
 
     COLOR IS THE MOST IMPORTANT SIGNAL — READ THIS CAREFULLY:
-    - Compare the DOMINANT jersey color of each image first, before anything else.
-    - If two images have a clearly different dominant color (e.g. one is green, another is yellow;
-      one is white, another is red) they are ALWAYS DIFFERENT PRODUCTS — put them in DIFFERENT groups,
-      even if both show the same brand logo (e.g. both have an Adidas logo), same generic style,
-      or no visible team crest at all.
-    - A visible brand logo (Adidas/Nike/Puma) alone is NEVER enough to group two images together.
-      Brand logos repeat across many different unrelated products.
+    - Compare the DOMINANT color of each item first, before anything else.
+    - If two images have a clearly different dominant color they are ALWAYS DIFFERENT PRODUCTS —
+      put them in DIFFERENT groups, even if both show the same brand logo (e.g. both have a Nike
+      or Adidas logo), same generic style, or no visible team crest at all.
+    - A visible brand logo alone is NEVER enough to group two images together.
     - Only group images together if you are confident they are PHOTOS OF THE SAME PHYSICAL ITEM —
-      same color, same trim/accent color, same pattern — just from a different angle or a
-      render vs a real photo of that same item.
+      same color, same trim/accent color, same pattern — just from a different angle, a different
+      marketing slide, or a render vs a real photo of that same item.
     - If you are not sure two images are the same product, DO NOT group them together.
       It is much better to create an extra separate group than to wrongly merge two different products.
 
-    CRITICAL SORTING RULES:
-    You must distinguish between "3D Renders" and "Real Photos" based on these visual clues:
-    - 3D Renders: Have a pure white background, stand upright (ghost mannequin), and often have the "KOS" logo in the corner.
-    - Real Photos: Are flat-lays on a greyish floor/surface, have visible fabric wrinkles, and often show the shirt and shorts laid out side-by-side.
-    
+    EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output
+    (in "front_view", "back_view", or "other_photos") — do not omit any index.
+
     For each product group, identify the image indices for:
-    - "front_view": MUST be the Front-facing 3D Render (white background). NEVER put a flat-lay real photo here if a 3D render exists.
-    - "back_view": MUST be the Back-facing 3D Render (white background). (Use null if there is no back view).
-    - "other_photos": Put ALL Real Photos (flat-lays on grey backgrounds) in this array.
-    
+    - "front_view": the clearest, most representative single image of this product
+      (prefer a clean 3D render / white-background ghost-mannequin shot if one exists for
+      this product; otherwise just use the best/clearest image of it).
+    - "back_view": a second distinct angle/render of the SAME product, if one exists. Use null if none.
+    - "other_photos": ALL remaining images of this same product (real photos, marketing slides,
+      feature-callout graphics, sole shots, etc. — anything not chosen as front/back).
+
     Return ONLY a valid JSON array of objects. Example:
     [
       {
@@ -312,7 +314,6 @@ def ai_group_images(image_paths: list) -> list:
         raw = raw.strip().strip("```json").strip("```").strip()
         
         # Safely extract the JSON array of objects
-        import re
         match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
         if match:
             structured_groups = json.loads(match.group())
@@ -323,29 +324,38 @@ def ai_group_images(image_paths: list) -> list:
         log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
         return [[p] for p in image_paths]
         
-    # Map indices back to file paths enforcing strict Python sorting
+    # Map indices back to file paths
     result = []
+    seen_indices = set()
     for group in structured_groups:
         current_group_paths = []
         
-        # 1. Force Front View to absolute position 0
         front_idx = group.get("front_view")
-        if isinstance(front_idx, int) and front_idx < len(image_paths):
+        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths) and front_idx not in seen_indices:
             current_group_paths.append(image_paths[front_idx])
+            seen_indices.add(front_idx)
             
-        # 2. Force Back View to absolute position 1
         back_idx = group.get("back_view")
-        if isinstance(back_idx, int) and back_idx < len(image_paths) and back_idx != front_idx:
+        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx not in seen_indices:
             current_group_paths.append(image_paths[back_idx])
+            seen_indices.add(back_idx)
             
-        # 3. Add all remaining photos last
-        for other_idx in group.get("other_photos", []):
-            if isinstance(other_idx, int) and other_idx < len(image_paths) and other_idx not in (front_idx, back_idx):
+        for other_idx in group.get("other_photos", []) or []:
+            if isinstance(other_idx, int) and 0 <= other_idx < len(image_paths) and other_idx not in seen_indices:
                 current_group_paths.append(image_paths[other_idx])
+                seen_indices.add(other_idx)
                 
         if current_group_paths:
             result.append(current_group_paths)
-            
+
+    # SAFETY NET: any image Gemini didn't place anywhere becomes its own group
+    # instead of silently vanishing (this was the cause of images going missing).
+    missing = [i for i in range(len(image_paths)) if i not in seen_indices]
+    if missing:
+        log.warning(f"Grouping left {len(missing)} image(s) unplaced: {missing} — adding as separate group(s)")
+        for idx in missing:
+            result.append([image_paths[idx]])
+
     return result or [image_paths]
 
 def detect_product_category(image_paths: list) -> str:
@@ -464,8 +474,8 @@ def generate_description(image_paths: list, cfg: dict) -> str:
     return gemini_call(parts)
 
 # ── Telegram posting ───────────────────────────────────────────────────────────
-async def post_album_to_channel(bot, image_paths: list, caption: str) -> bool:
-    """Post a photo album to the channel."""
+async def post_album_to_channel(bot, image_paths: list, caption: str):
+    """Post a photo album to the channel. Returns (ok: bool, error_message: str)."""
     import aiohttp as _aio
     base  = f"https://api.telegram.org/bot{BOT_TOKEN}"
     media = []
@@ -490,7 +500,11 @@ async def post_album_to_channel(bot, image_paths: list, caption: str) -> bool:
                                content_type="image/jpeg")
             async with session.post(f"{base}/sendMediaGroup", data=form) as resp:
                 result = await resp.json()
-                return result.get("ok", False)
+                if result.get("ok"):
+                    return True, ""
+                return False, result.get("description", "Unknown Telegram API error")
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
     finally:
         for fobj in files.values():
             fobj.close()
@@ -667,6 +681,8 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         total = len(groups)
         templates = load_templates()
+        group_sizes = ", ".join(str(len(g)) for g in groups)
+        log.info(f"Grouped {len(all_images)} images into {total} group(s): sizes=[{group_sizes}]")
 
         # ── Ask for the template ONCE for the whole batch ──────────────────
         batch_key = f"{update.effective_chat.id}_{update.message.message_id}"
@@ -687,7 +703,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         await status_msg.edit_text(
             f"📦 *{doc.file_name}*\n"
-            f"🖼 Found *{total} product(s)*\n\n"
+            f"🖼 Found *{total} product(s)* (photos per product: {group_sizes})\n\n"
             f"Choose a description style to apply to *all {total} products* in this batch:",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=keyboard
@@ -709,6 +725,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # ── Generate + post every product automatically with the chosen style ──
         posted = 0
         failed = 0
+        error_details = []
 
         for i, images in enumerate(groups, 1):
             try:
@@ -724,17 +741,23 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     caption = f"{caption}\n\n{tmpl_text}"
 
                 ok_all = True
+                post_errors = []
                 for chunk_start in range(0, len(images), MAX_ALBUM_SIZE):
                     chunk = images[chunk_start:chunk_start + MAX_ALBUM_SIZE]
-                    ok = await post_album_to_channel(ctx.bot, chunk,
+                    ok, err_msg = await post_album_to_channel(ctx.bot, chunk,
                                                      caption if chunk_start == 0 else "")
                     ok_all = ok_all and ok
+                    if not ok:
+                        post_errors.append(err_msg)
                     await asyncio.sleep(2)
 
                 if ok_all:
                     posted += 1
                 else:
                     failed += 1
+                    detail = f"Product {i}/{total}: " + "; ".join(post_errors)
+                    error_details.append(detail)
+                    log.error(detail)
 
                 if i < total:
                     await asyncio.sleep(12)
@@ -749,19 +772,38 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     )
                     return
                 else:
-                    log.error(f"Product {i} failed: {e}")
                     failed += 1
+                    detail = f"Product {i}/{total}: {e}"
+                    error_details.append(detail)
+                    log.error(detail)
                     continue
+            except Exception as e:
+                # Catch anything unexpected per-product so one bad product
+                # doesn't silently vanish without explanation
+                failed += 1
+                detail = f"Product {i}/{total}: {type(e).__name__}: {e}"
+                error_details.append(detail)
+                log.exception(f"Unexpected error on product {i}")
+                continue
 
         # Final report
         icon = "✅" if failed == 0 else "⚠️"
-        await status_msg.edit_text(
+        report = (
             f"{icon} *Done!*\n\n"
             f"📮 Posted: *{posted}* product(s) to channel\n"
             f"❌ Failed: *{failed}*\n"
-            f"📊 Gemini quota remaining: *{rate_limiter.remaining_today}/{GEMINI_RPD}*",
-            parse_mode=ParseMode.MARKDOWN
+            f"📊 Gemini quota remaining: *{rate_limiter.remaining_today}/{GEMINI_RPD}*"
         )
+        await status_msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
+
+        # Send the actual error reasons as a separate message so failures are never silent
+        if error_details:
+            error_text = "🔍 *Failure details:*\n\n" + "\n\n".join(
+                f"• {d[:300]}" for d in error_details
+            )
+            if len(error_text) > 4000:
+                error_text = error_text[:4000] + "…"
+            await update.message.reply_text(error_text, parse_mode=ParseMode.MARKDOWN)
 
     except Exception as e:
         log.exception("Unexpected error")
