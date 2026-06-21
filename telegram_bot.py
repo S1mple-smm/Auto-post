@@ -146,7 +146,7 @@ log = logging.getLogger(__name__)
 try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import (Application, CommandHandler, MessageHandler,
-                              ContextTypes, filters)
+                              CallbackQueryHandler, ContextTypes, filters)
     from telegram.constants import ParseMode
 except ImportError:
     sys.exit("❌  Run:  pip install python-telegram-bot")
@@ -213,6 +213,19 @@ def load_shop_config() -> dict:
         with open(SHOP_CONFIG_FILE, encoding="utf-8") as f:
             return json.load(f)
     return {}
+
+# ── Description templates (fixed text blocks, saved by name) ──────────────────
+TEMPLATES_FILE = "templates.json"
+
+def load_templates() -> dict:
+    if os.path.exists(TEMPLATES_FILE):
+        with open(TEMPLATES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_templates(templates: dict):
+    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
+        json.dump(templates, f, ensure_ascii=False, indent=2)
 
 # ── Gemini helpers ─────────────────────────────────────────────────────────────
 def load_image_bytes(path: str, max_size=(800, 800)) -> bytes:
@@ -443,12 +456,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"👋 *Smart Product Poster*\n\n"
         f"🏪 Shop: {shop}\n"
         f"📊 Gemini quota today: {remaining}/{GEMINI_RPD} requests left\n\n"
-        f"Just send me a *ZIP file* with product photos — I'll auto-group them by product "
-        f"and post each one to your channel with an AI-generated description.\n\n"
+        f"Just send me a *ZIP file* with product photos — I'll auto-group them by product, "
+        f"write a description for each, then let you pick a style/template before posting.\n\n"
         f"Commands:\n"
         f"/start — show this message\n"
         f"/quota — check remaining Gemini quota\n"
-        f"/shop — show current shop config",
+        f"/shop — show current shop config\n"
+        f"/newtemplate Name | text — save a reusable text block\n"
+        f"/templates — list saved templates\n"
+        f"/deltemplate Name — delete a template",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -468,6 +484,61 @@ async def cmd_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     text = "\n".join(f"*{k}:* {v}" for k, v in cfg.items())
     await update.message.reply_text(f"🏪 *Shop config:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
+
+async def cmd_newtemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /newtemplate Template Name | template text goes here"""
+    if not is_allowed(update.effective_user.id): return
+    raw = update.message.text.partition(" ")[2].strip()
+    if "|" not in raw:
+        await update.message.reply_text(
+            "📝 *Usage:*\n`/newtemplate Name | template text here`\n\n"
+            "Example:\n`/newtemplate Black Friday | 🔥 Скидка 20%! Только сегодня!`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    name, _, body = raw.partition("|")
+    name = name.strip()
+    body = body.strip()
+    if not name or not body:
+        await update.message.reply_text("⚠️ Both a name and template text are required.")
+        return
+
+    templates = load_templates()
+    templates[name] = body
+    save_templates(templates)
+    await update.message.reply_text(
+        f"✅ Template saved as *{name}*\n\n{body}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def cmd_templates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id): return
+    templates = load_templates()
+    if not templates:
+        await update.message.reply_text(
+            "📭 No templates saved yet.\nCreate one with:\n"
+            "`/newtemplate Name | template text`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+    lines = [f"• *{name}*\n  {body[:80]}{'…' if len(body) > 80 else ''}"
+             for name, body in templates.items()]
+    await update.message.reply_text(
+        "📋 *Saved templates:*\n\n" + "\n\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def cmd_deltemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Usage: /deltemplate Name"""
+    if not is_allowed(update.effective_user.id): return
+    name = update.message.text.partition(" ")[2].strip()
+    templates = load_templates()
+    if name not in templates:
+        await update.message.reply_text(f"⚠️ No template named *{name}* found.", parse_mode=ParseMode.MARKDOWN)
+        return
+    del templates[name]
+    save_templates(templates)
+    await update.message.reply_text(f"🗑 Deleted template *{name}*", parse_mode=ParseMode.MARKDOWN)
 
 async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Main handler: receives ZIP, processes, posts to channel."""
@@ -522,16 +593,50 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         groups = await loop.run_in_executor(None, ai_group_images, all_images)
 
         total = len(groups)
+        templates = load_templates()
+
+        # ── Ask for the template ONCE for the whole batch ──────────────────
+        batch_key = f"{update.effective_chat.id}_{update.message.message_id}"
+        buttons = [[InlineKeyboardButton("🚫 No template — post as is",
+                                          callback_data=f"batchtmpl::__none__::{batch_key}")]]
+        for name in templates.keys():
+            payload = f"batchtmpl::{name}::{batch_key}"
+            if len(payload.encode("utf-8")) > 64:
+                continue
+            buttons.append([InlineKeyboardButton(f"📋 {name}", callback_data=payload)])
+        keyboard = InlineKeyboardMarkup(buttons)
+
+        event = asyncio.Event()
+        ctx.bot_data.setdefault("pending_batches", {})[batch_key] = {
+            "event": event,
+            "template": None,
+        }
+
         await status_msg.edit_text(
             f"📦 *{doc.file_name}*\n"
-            f"🖼 Found *{total} product(s)* — starting to post…\n"
-            f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left",
+            f"🖼 Found *{total} product(s)*\n\n"
+            f"Choose a description style to apply to *all {total} products* in this batch:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
+
+        await event.wait()
+        chosen = ctx.bot_data["pending_batches"].pop(batch_key, {})
+        tmpl_name = chosen.get("template") or "__none__"
+        tmpl_text = templates.get(tmpl_name, "") if tmpl_name != "__none__" else ""
+
+        await status_msg.edit_text(
+            f"📦 *{doc.file_name}*\n"
+            f"🖼 *{total} product(s)* — style: *{tmpl_name if tmpl_name != '__none__' else 'No template'}*\n"
+            f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left\n\n"
+            f"⏳ Starting to post…",
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # Post each group
+        # ── Generate + post every product automatically with the chosen style ──
         posted = 0
         failed = 0
+
         for i, images in enumerate(groups, 1):
             try:
                 await status_msg.edit_text(
@@ -541,22 +646,23 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     parse_mode=ParseMode.MARKDOWN
                 )
 
-                # Generate description in thread pool (blocking)
-                caption = await loop.run_in_executor(
-                    None, generate_description, images, cfg)
+                caption = await loop.run_in_executor(None, generate_description, images, cfg)
+                if tmpl_text:
+                    caption = f"{caption}\n\n{tmpl_text}"
 
-                # Post album to channel
+                ok_all = True
                 for chunk_start in range(0, len(images), MAX_ALBUM_SIZE):
                     chunk = images[chunk_start:chunk_start + MAX_ALBUM_SIZE]
                     ok = await post_album_to_channel(ctx.bot, chunk,
                                                      caption if chunk_start == 0 else "")
-                    if ok:
-                        posted += 1
-                    else:
-                        failed += 1
+                    ok_all = ok_all and ok
                     await asyncio.sleep(2)
 
-                # Wait between posts (rate limit buffer)
+                if ok_all:
+                    posted += 1
+                else:
+                    failed += 1
+
                 if i < total:
                     await asyncio.sleep(12)
 
@@ -591,6 +697,31 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
+# ── Template selection callback (applies to the whole ZIP batch) ──────────────
+async def handle_template_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_allowed(query.from_user.id):
+        return
+
+    try:
+        _, tmpl_name, batch_key = query.data.split("::", 2)
+    except ValueError:
+        await query.edit_message_text("⚠️ This button has expired.")
+        return
+
+    pending = ctx.bot_data.get("pending_batches", {}).get(batch_key)
+    if not pending:
+        await query.edit_message_text("⚠️ This session has expired (bot may have restarted). Please resend the ZIP.")
+        return
+
+    pending["template"] = tmpl_name
+    event = pending.get("event")
+    if event:
+        event.set()
+    # The main handle_zip loop takes over from here and edits status_msg itself.
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     log.info("Starting Smart Product Poster bot…")
@@ -602,6 +733,10 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("quota", cmd_quota))
     app.add_handler(CommandHandler("shop",  cmd_shop))
+    app.add_handler(CommandHandler("newtemplate", cmd_newtemplate))
+    app.add_handler(CommandHandler("templates",   cmd_templates))
+    app.add_handler(CommandHandler("deltemplate", cmd_deltemplate))
+    app.add_handler(CallbackQueryHandler(handle_template_choice, pattern=r"^batchtmpl::"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_zip))
 
     log.info("Bot is running. Send a ZIP file to start.")
