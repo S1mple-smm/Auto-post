@@ -42,7 +42,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     remaining = rate_limiter.remaining_today
     status_msg = await update.message.reply_text(
-        f"📦 Received *{escape_md(doc.file_name)}*\n"
+        f"📦 Received *{doc.file_name}*\n"
         f"📊 Gemini quota: {remaining}/{GEMINI_RPD} left today\n\n"
         f"⏳ Downloading large file directly via MTProto…",
         parse_mode=ParseMode.MARKDOWN
@@ -63,7 +63,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await telethon_client.download_media(telethon_msg.media, file=zip_path)
 
         await status_msg.edit_text(
-            f"📦 *{escape_md(doc.file_name)}* downloaded successfully!\n"
+            f"📦 *{doc.file_name}* downloaded successfully!\n"
             f"🤖 Analyzing photos and sorting into albums…",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -80,7 +80,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         total = len(groups)
         await status_msg.edit_text(
-            f"📦 *{escape_md(doc.file_name)}*\n"
+            f"📦 *{doc.file_name}*\n"
             f"🖼 Found *{total} product(s)* — starting to post…\n"
             f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left",
             parse_mode=ParseMode.MARKDOWN
@@ -92,7 +92,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for i, images in enumerate(groups, 1):
             try:
                 await status_msg.edit_text(
-                    f"📦 *{escape_md(doc.file_name)}*\n"
+                    f"📦 *{doc.file_name}*\n"
                     f"⏳ Processing product *{i}/{total}* ({len(images)} photos)…",
                     parse_mode=ParseMode.MARKDOWN
                 )
@@ -146,7 +146,7 @@ log = logging.getLogger(__name__)
 try:
     from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
     from telegram.ext import (Application, CommandHandler, MessageHandler,
-                              CallbackQueryHandler, ContextTypes, filters)
+                              ContextTypes, filters)
     from telegram.constants import ParseMode
 except ImportError:
     sys.exit("❌  Run:  pip install python-telegram-bot")
@@ -208,36 +208,11 @@ class RateLimiter:
 rate_limiter = RateLimiter(GEMINI_RPM, GEMINI_RPD)
 
 # ── Shop config ────────────────────────────────────────────────────────────────
-def escape_md(text: str) -> str:
-    """
-    Escape special characters for Telegram's legacy Markdown parser so that
-    user-controlled or AI-generated text (filenames, template names, etc.)
-    can never break message parsing with 'can't find end of the entity' errors.
-    """
-    if not text:
-        return text
-    for ch in ("_", "*", "`", "["):
-        text = text.replace(ch, f"\\{ch}")
-    return text
-
 def load_shop_config() -> dict:
     if os.path.exists(SHOP_CONFIG_FILE):
         with open(SHOP_CONFIG_FILE, encoding="utf-8") as f:
             return json.load(f)
     return {}
-
-# ── Description templates (fixed text blocks, saved by name) ──────────────────
-TEMPLATES_FILE = "templates.json"
-
-def load_templates() -> dict:
-    if os.path.exists(TEMPLATES_FILE):
-        with open(TEMPLATES_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    return {}
-
-def save_templates(templates: dict):
-    with open(TEMPLATES_FILE, "w", encoding="utf-8") as f:
-        json.dump(templates, f, ensure_ascii=False, indent=2)
 
 # ── Gemini helpers ─────────────────────────────────────────────────────────────
 def load_image_bytes(path: str, max_size=(800, 800)) -> bytes:
@@ -270,9 +245,6 @@ def ai_group_images(image_paths: list) -> list:
     """
     Passes all images to Gemini simultaneously for visual grouping.
     Uses strict JSON keys and explicit visual cues to guarantee sorting order.
-    Guarantees every input image ends up in exactly one output group —
-    any image Gemini doesn't explicitly place gets appended as its own group
-    instead of being silently dropped.
     """
     parts = []
     for i, path in enumerate(image_paths):
@@ -281,32 +253,18 @@ def ai_group_images(image_paths: list) -> list:
         
     prompt = """
     You are an expert sports apparel merchandiser. Look at all the provided images.
-
-    Group the images that show the EXACT same physical product.
-
-    COLOR IS THE MOST IMPORTANT SIGNAL — READ THIS CAREFULLY:
-    - Compare the DOMINANT color of each item first, before anything else.
-    - If two images have a clearly different dominant color they are ALWAYS DIFFERENT PRODUCTS —
-      put them in DIFFERENT groups, even if both show the same brand logo (e.g. both have a Nike
-      or Adidas logo), same generic style, or no visible team crest at all.
-    - A visible brand logo alone is NEVER enough to group two images together.
-    - Only group images together if you are confident they are PHOTOS OF THE SAME PHYSICAL ITEM —
-      same color, same trim/accent color, same pattern — just from a different angle, a different
-      marketing slide, or a render vs a real photo of that same item.
-    - If you are not sure two images are the same product, DO NOT group them together.
-      It is much better to create an extra separate group than to wrongly merge two different products.
-
-    EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output
-    (in "front_view", "back_view", or "other_photos") — do not omit any index.
-
+    Group the images that show the EXACT same product (same team, same colors). 
+    
+    CRITICAL SORTING RULES:
+    You must distinguish between "3D Renders" and "Real Photos" based on these visual clues:
+    - 3D Renders: Have a pure white background, stand upright (ghost mannequin), and often have the "KOS" logo in the corner.
+    - Real Photos: Are flat-lays on a greyish floor/surface, have visible fabric wrinkles, and often show the shirt and shorts laid out side-by-side.
+    
     For each product group, identify the image indices for:
-    - "front_view": the clearest, most representative single image of this product
-      (prefer a clean 3D render / white-background ghost-mannequin shot if one exists for
-      this product; otherwise just use the best/clearest image of it).
-    - "back_view": a second distinct angle/render of the SAME product, if one exists. Use null if none.
-    - "other_photos": ALL remaining images of this same product (real photos, marketing slides,
-      feature-callout graphics, sole shots, etc. — anything not chosen as front/back).
-
+    - "front_view": MUST be the Front-facing 3D Render (white background). NEVER put a flat-lay real photo here if a 3D render exists.
+    - "back_view": MUST be the Back-facing 3D Render (white background). (Use null if there is no back view).
+    - "other_photos": Put ALL Real Photos (flat-lays on grey backgrounds) in this array.
+    
     Return ONLY a valid JSON array of objects. Example:
     [
       {
@@ -326,6 +284,7 @@ def ai_group_images(image_paths: list) -> list:
         raw = raw.strip().strip("```json").strip("```").strip()
         
         # Safely extract the JSON array of objects
+        import re
         match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
         if match:
             structured_groups = json.loads(match.group())
@@ -336,117 +295,32 @@ def ai_group_images(image_paths: list) -> list:
         log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
         return [[p] for p in image_paths]
         
-    # Map indices back to file paths
+    # Map indices back to file paths enforcing strict Python sorting
     result = []
-    seen_indices = set()
     for group in structured_groups:
         current_group_paths = []
         
+        # 1. Force Front View to absolute position 0
         front_idx = group.get("front_view")
-        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths) and front_idx not in seen_indices:
+        if isinstance(front_idx, int) and front_idx < len(image_paths):
             current_group_paths.append(image_paths[front_idx])
-            seen_indices.add(front_idx)
             
+        # 2. Force Back View to absolute position 1
         back_idx = group.get("back_view")
-        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx not in seen_indices:
+        if isinstance(back_idx, int) and back_idx < len(image_paths) and back_idx != front_idx:
             current_group_paths.append(image_paths[back_idx])
-            seen_indices.add(back_idx)
             
-        for other_idx in group.get("other_photos", []) or []:
-            if isinstance(other_idx, int) and 0 <= other_idx < len(image_paths) and other_idx not in seen_indices:
+        # 3. Add all remaining photos last
+        for other_idx in group.get("other_photos", []):
+            if isinstance(other_idx, int) and other_idx < len(image_paths) and other_idx not in (front_idx, back_idx):
                 current_group_paths.append(image_paths[other_idx])
-                seen_indices.add(other_idx)
                 
         if current_group_paths:
             result.append(current_group_paths)
-
-    # SAFETY NET: any image Gemini didn't place anywhere becomes its own group
-    # instead of silently vanishing (this was the cause of images going missing).
-    missing = [i for i in range(len(image_paths)) if i not in seen_indices]
-    if missing:
-        log.warning(f"Grouping left {len(missing)} image(s) unplaced: {missing} — adding as separate group(s)")
-        for idx in missing:
-            result.append([image_paths[idx]])
-
+            
     return result or [image_paths]
 
-def detect_product_category(image_paths: list) -> str:
-    """
-    Ask Gemini what TYPE of product this group is, so the caption can use the
-    right wording/sizes (jersey vs boots vs other). One cheap call per group.
-    Returns one of: "jersey", "boots", "other"
-    """
-    parts = []
-    for path in image_paths[:3]:
-        parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-    parts.append(types.Part.from_text(text="""
-Look at this product image. What category of sportswear product is it?
-
-Reply with ONLY one word, no punctuation, no explanation:
-- "jersey" if it's a football/sports shirt, kit, or jersey+shorts set (worn on the torso)
-- "boots" if it's football boots/cleats/sneakers (worn on the feet)
-- "other" if it's anything else (gloves, balls, bags, accessories, etc.)
-"""))
-    try:
-        raw = gemini_call(parts).strip().lower()
-        raw = re.sub(r'[^a-z]', '', raw)
-        if raw in ("jersey", "boots", "other"):
-            return raw
-    except Exception as e:
-        log.warning(f"Category detection failed: {e}")
-    return "jersey"  # safe default — matches original behaviour
-
-# ── Per-category caption profiles ──────────────────────────────────────────────
-# Each profile defines the example structure Gemini should mimic for that
-# product type. "sizes_key" looks up the right size list from shop.json,
-# falling back to "sizes" for backward compatibility with existing configs.
-CATEGORY_PROFILES = {
-    "jersey": {
-        "sizes_key": "sizes",
-        "default_sizes": "S, M, L, XL, 2XL",
-        "example": (
-            "Футбольня форма клуба/сборной:\n"
-            "⚽Многофункциональная: Идеально подходит для футбола бега и интенсивных тренировок.\n"
-            "📐Размеры: В наличии размеры {sizes}.\n"
-            "🧵Материал: Легкий и дышащий полиэстер\n"
-            "💡Стиль: Спортивный с длинным/коротким рукавом.\n"
-            "👕Комфорт: Свободная и удобная посадка для удобства в движении.\n"
-            "🚚Доставка осуществляется в течении {delivery}\n"
-            "💰{price}\n\n"
-            "{uzum_line}{tg_line}{admin}"
-        ),
-    },
-    "boots": {
-        "sizes_key": "shoe_sizes",
-        "default_sizes": "38, 39, 40, 41, 42, 43, 44, 45",
-        "example": (
-            "Футбольные бутсы:\n"
-            "⚽Многофункциональные: Идеально подходят для игры на натуральном и искусственном газоне.\n"
-            "📐Размеры: В наличии размеры {sizes}.\n"
-            "🧵Материал: Прочный и легкий верх, обеспечивающий контроль мяча.\n"
-            "💡Стиль: Обтекаемый дизайн, эластичный язычок, мягкий воротник.\n"
-            "👟Комфорт: Плотная посадка для уверенного контроля на поле.\n"
-            "🚚Доставка осуществляется в течении {delivery}\n"
-            "💰{price}\n\n"
-            "{uzum_line}{tg_line}{admin}"
-        ),
-    },
-    "other": {
-        "sizes_key": "sizes",
-        "default_sizes": "Универсальный",
-        "example": (
-            "Спортивный аксессуар:\n"
-            "⚽Многофункциональный: Идеально подходит для тренировок и игр.\n"
-            "📐Размеры: {sizes}.\n"
-            "🧵Материал: Качественные материалы.\n"
-            "🚚Доставка осуществляется в течении {delivery}\n"
-            "💰{price}\n\n"
-            "{uzum_line}{tg_line}{admin}"
-        ),
-    },
-}
-
-def build_caption_prompt(cfg: dict, category: str = "jersey") -> str:
+def build_caption_prompt(cfg: dict) -> str:
     lang_map  = {"ru": "Russian", "uz": "Uzbek", "en": "English"}
     lang      = lang_map.get(cfg.get("language", "ru"), "Russian")
     uzum_line = f"Наш магазин на Узум:\n{cfg['uzum_link']}\n" if cfg.get("uzum_link") else ""
@@ -454,15 +328,21 @@ def build_caption_prompt(cfg: dict, category: str = "jersey") -> str:
     admin     = cfg.get("admin_tag", "")
     price     = cfg.get("price", "")
     delivery  = cfg.get("delivery", "")
+    
+    # Defaults strictly to your required footwear sizes
+    sizes     = cfg.get("sizes", "38, 39, 40, 41, 42, 43, 44, 45") 
 
-    profile = CATEGORY_PROFILES.get(category, CATEGORY_PROFILES["jersey"])
-    sizes   = cfg.get(profile["sizes_key"]) or cfg.get("sizes") or profile["default_sizes"]
-
-    example = profile["example"].format(
-        sizes=sizes, delivery=delivery, price=price,
-        uzum_line=uzum_line, tg_line=tg_line, admin=admin
+    example = (
+        f"Футбольня форма клуба/сборной:\n"
+        f"⚽Многофункциональная: Идеально подходит для футбола бега и интенсивных тренировок.\n"
+        f"📐Размеры: В наличии размеры {sizes}.\n"
+        f"🧵Материал:  Легкий и дышащий полиэстер\n"
+        f"💡Стиль: Спортивный с длинным/коротким рукавом.\n"
+        f"👕Комфорт: Свободная и удобная посадка для удобства в движении.\n"
+        f"🚚Доставка осуществляется в течении {delivery}\n"
+        f"💰{price}\n\n"
+        f"{uzum_line}{tg_line}{admin}"
     )
-
     return (
         f"You are a product copywriter for a sportswear shop.\n"
         f"Look at the product image(s) and write a Telegram post in {lang} "
@@ -470,56 +350,23 @@ def build_caption_prompt(cfg: dict, category: str = "jersey") -> str:
         f"- First line: ONLY the model name + color. DO NOT use brand names in the title or description.\n"
         f"- Emoji bullets for each feature\n"
         f"- Include: purpose, sizes ({sizes}), material, style, comfort, delivery ({delivery}), price ({price})\n"
-        f"- Use wording appropriate for this exact product type — do not call boots a 'jersey' or mention sleeves on footwear, etc.\n"
         f"- End with shop links and admin tag exactly as shown\n"
         f"- Output ONLY the post text, no markdown, no backticks"
     )
 
 
 def generate_description(image_paths: list, cfg: dict) -> str:
-    category = detect_product_category(image_paths)
-    log.info(f"  Detected category: {category}")
     parts = []
     for path in image_paths[:4]:
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-    parts.append(types.Part.from_text(text=build_caption_prompt(cfg, category)))
+    parts.append(types.Part.from_text(text=build_caption_prompt(cfg)))
     return gemini_call(parts)
 
 # ── Telegram posting ───────────────────────────────────────────────────────────
-async def post_album_to_channel(bot, image_paths: list, caption: str):
-    """
-    Post photo(s) to the channel. Returns (ok: bool, error_message: str).
-    Telegram's sendMediaGroup requires 2-10 items — a single photo must use
-    sendPhoto instead, or Telegram rejects the whole request.
-    """
+async def post_album_to_channel(bot, image_paths: list, caption: str) -> bool:
+    """Post a photo album to the channel."""
     import aiohttp as _aio
-    import html as _html
-    base = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
-    # Escape HTML special chars so stray '<', '>', '&' in AI-generated text
-    # (e.g. "2-3 < 5 дня") can't break Telegram's HTML parser.
-    safe_caption = _html.escape(caption, quote=False) if caption else caption
-
-    if len(image_paths) == 1:
-        # Single photo — use sendPhoto, not sendMediaGroup
-        path = image_paths[0]
-        try:
-            with open(path, "rb") as f:
-                async with _aio.ClientSession() as session:
-                    form = _aio.FormData()
-                    form.add_field("chat_id", str(CHANNEL_ID))
-                    if safe_caption:
-                        form.add_field("caption", safe_caption)
-                        form.add_field("parse_mode", "HTML")
-                    form.add_field("photo", f, filename=Path(path).name, content_type="image/jpeg")
-                    async with session.post(f"{base}/sendPhoto", data=form) as resp:
-                        result = await resp.json()
-                        if result.get("ok"):
-                            return True, ""
-                        return False, result.get("description", "Unknown Telegram API error")
-        except Exception as e:
-            return False, f"{type(e).__name__}: {e}"
-
+    base  = f"https://api.telegram.org/bot{BOT_TOKEN}"
     media = []
     files = {}
 
@@ -528,7 +375,7 @@ async def post_album_to_channel(bot, image_paths: list, caption: str):
         files[field] = open(path, "rb")
         entry = {"type": "photo", "media": f"attach://{field}"}
         if i == 0:
-            entry["caption"]    = safe_caption
+            entry["caption"]    = caption
             entry["parse_mode"] = "HTML"
         media.append(entry)
 
@@ -542,11 +389,7 @@ async def post_album_to_channel(bot, image_paths: list, caption: str):
                                content_type="image/jpeg")
             async with session.post(f"{base}/sendMediaGroup", data=form) as resp:
                 result = await resp.json()
-                if result.get("ok"):
-                    return True, ""
-                return False, result.get("description", "Unknown Telegram API error")
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+                return result.get("ok", False)
     finally:
         for fobj in files.values():
             fobj.close()
@@ -585,15 +428,12 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"👋 *Smart Product Poster*\n\n"
         f"🏪 Shop: {shop}\n"
         f"📊 Gemini quota today: {remaining}/{GEMINI_RPD} requests left\n\n"
-        f"Just send me a *ZIP file* with product photos — I'll auto-group them by product, "
-        f"write a description for each, then let you pick a style/template before posting.\n\n"
+        f"Just send me a *ZIP file* with product photos — I'll auto-group them by product "
+        f"and post each one to your channel with an AI-generated description.\n\n"
         f"Commands:\n"
         f"/start — show this message\n"
         f"/quota — check remaining Gemini quota\n"
-        f"/shop — show current shop config\n"
-        f"/newtemplate Name | text — save a reusable text block\n"
-        f"/templates — list saved templates\n"
-        f"/deltemplate Name — delete a template",
+        f"/shop — show current shop config",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -613,61 +453,6 @@ async def cmd_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     text = "\n".join(f"*{k}:* {v}" for k, v in cfg.items())
     await update.message.reply_text(f"🏪 *Shop config:*\n\n{text}", parse_mode=ParseMode.MARKDOWN)
-
-async def cmd_newtemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /newtemplate Template Name | template text goes here"""
-    if not is_allowed(update.effective_user.id): return
-    raw = update.message.text.partition(" ")[2].strip()
-    if "|" not in raw:
-        await update.message.reply_text(
-            "📝 *Usage:*\n`/newtemplate Name | template text here`\n\n"
-            "Example:\n`/newtemplate Black Friday | 🔥 Скидка 20%! Только сегодня!`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    name, _, body = raw.partition("|")
-    name = name.strip()
-    body = body.strip()
-    if not name or not body:
-        await update.message.reply_text("⚠️ Both a name and template text are required.")
-        return
-
-    templates = load_templates()
-    templates[name] = body
-    save_templates(templates)
-    await update.message.reply_text(
-        f"✅ Template saved as *{escape_md(name)}*\n\n{escape_md(body)}",
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def cmd_templates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id): return
-    templates = load_templates()
-    if not templates:
-        await update.message.reply_text(
-            "📭 No templates saved yet.\nCreate one with:\n"
-            "`/newtemplate Name | template text`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-        return
-    lines = [f"• *{escape_md(name)}*\n  {escape_md(body[:80])}{'…' if len(body) > 80 else ''}"
-             for name, body in templates.items()]
-    await update.message.reply_text(
-        "📋 *Saved templates:*\n\n" + "\n\n".join(lines),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def cmd_deltemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Usage: /deltemplate Name"""
-    if not is_allowed(update.effective_user.id): return
-    name = update.message.text.partition(" ")[2].strip()
-    templates = load_templates()
-    if name not in templates:
-        await update.message.reply_text(f"⚠️ No template named *{escape_md(name)}* found.", parse_mode=ParseMode.MARKDOWN)
-        return
-    del templates[name]
-    save_templates(templates)
-    await update.message.reply_text(f"🗑 Deleted template *{escape_md(name)}*", parse_mode=ParseMode.MARKDOWN)
 
 async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Main handler: receives ZIP, processes, posts to channel."""
@@ -690,7 +475,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     remaining = rate_limiter.remaining_today
     status_msg = await update.message.reply_text(
-        f"📦 Received *{escape_md(doc.file_name)}*\n"
+        f"📦 Received *{doc.file_name}*\n"
         f"📊 Gemini quota: {remaining}/{GEMINI_RPD} left today\n\n"
         f"⏳ Downloading…",
         parse_mode=ParseMode.MARKDOWN
@@ -706,7 +491,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await tg_file.download_to_drive(zip_path)
 
         await status_msg.edit_text(
-            f"📦 *{escape_md(doc.file_name)}* downloaded\n"
+            f"📦 *{doc.file_name}* downloaded\n"
             f"🤖 Analysing each photo individually (team/color/type)…",
             parse_mode=ParseMode.MARKDOWN
         )
@@ -722,85 +507,41 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         groups = await loop.run_in_executor(None, ai_group_images, all_images)
 
         total = len(groups)
-        templates = load_templates()
-        group_sizes = ", ".join(str(len(g)) for g in groups)
-        log.info(f"Grouped {len(all_images)} images into {total} group(s): sizes=[{group_sizes}]")
-
-        # ── Ask for the template ONCE for the whole batch ──────────────────
-        batch_key = f"{update.effective_chat.id}_{update.message.message_id}"
-        buttons = [[InlineKeyboardButton("🚫 No template — post as is",
-                                          callback_data=f"batchtmpl::__none__::{batch_key}")]]
-        for name in templates.keys():
-            payload = f"batchtmpl::{name}::{batch_key}"
-            if len(payload.encode("utf-8")) > 64:
-                continue
-            buttons.append([InlineKeyboardButton(f"📋 {name}", callback_data=payload)])
-        keyboard = InlineKeyboardMarkup(buttons)
-
-        event = asyncio.Event()
-        ctx.bot_data.setdefault("pending_batches", {})[batch_key] = {
-            "event": event,
-            "template": None,
-        }
-
         await status_msg.edit_text(
-            f"📦 *{escape_md(doc.file_name)}*\n"
-            f"🖼 Found *{total} product(s)* (photos per product: {group_sizes})\n\n"
-            f"Choose a description style to apply to *all {total} products* in this batch:",
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=keyboard
-        )
-
-        await event.wait()
-        chosen = ctx.bot_data["pending_batches"].pop(batch_key, {})
-        tmpl_name = chosen.get("template") or "__none__"
-        tmpl_text = templates.get(tmpl_name, "") if tmpl_name != "__none__" else ""
-
-        await status_msg.edit_text(
-            f"📦 *{escape_md(doc.file_name)}*\n"
-            f"🖼 *{total} product(s)* — style: *{escape_md(tmpl_name) if tmpl_name != '__none__' else 'No template'}*\n"
-            f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left\n\n"
-            f"⏳ Starting to post…",
+            f"📦 *{doc.file_name}*\n"
+            f"🖼 Found *{total} product(s)* — starting to post…\n"
+            f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left",
             parse_mode=ParseMode.MARKDOWN
         )
 
-        # ── Generate + post every product automatically with the chosen style ──
+        # Post each group
         posted = 0
         failed = 0
-        error_details = []
-
         for i, images in enumerate(groups, 1):
             try:
                 await status_msg.edit_text(
-                    f"📦 *{escape_md(doc.file_name)}*\n"
+                    f"📦 *{doc.file_name}*\n"
                     f"⏳ Processing product *{i}/{total}* ({len(images)} photos)…\n"
                     f"📊 Quota: {rate_limiter.remaining_today}/{GEMINI_RPD} left",
                     parse_mode=ParseMode.MARKDOWN
                 )
 
-                caption = await loop.run_in_executor(None, generate_description, images, cfg)
-                if tmpl_text:
-                    caption = f"{caption}\n\n{tmpl_text}"
+                # Generate description in thread pool (blocking)
+                caption = await loop.run_in_executor(
+                    None, generate_description, images, cfg)
 
-                ok_all = True
-                post_errors = []
+                # Post album to channel
                 for chunk_start in range(0, len(images), MAX_ALBUM_SIZE):
                     chunk = images[chunk_start:chunk_start + MAX_ALBUM_SIZE]
-                    ok, err_msg = await post_album_to_channel(ctx.bot, chunk,
+                    ok = await post_album_to_channel(ctx.bot, chunk,
                                                      caption if chunk_start == 0 else "")
-                    ok_all = ok_all and ok
-                    if not ok:
-                        post_errors.append(err_msg)
+                    if ok:
+                        posted += 1
+                    else:
+                        failed += 1
                     await asyncio.sleep(2)
 
-                if ok_all:
-                    posted += 1
-                else:
-                    failed += 1
-                    detail = f"Product {i}/{total}: " + "; ".join(post_errors)
-                    error_details.append(detail)
-                    log.error(detail)
-
+                # Wait between posts (rate limit buffer)
                 if i < total:
                     await asyncio.sleep(12)
 
@@ -814,39 +555,19 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     )
                     return
                 else:
+                    log.error(f"Product {i} failed: {e}")
                     failed += 1
-                    detail = f"Product {i}/{total}: {e}"
-                    error_details.append(detail)
-                    log.error(detail)
                     continue
-            except Exception as e:
-                # Catch anything unexpected per-product so one bad product
-                # doesn't silently vanish without explanation
-                failed += 1
-                detail = f"Product {i}/{total}: {type(e).__name__}: {e}"
-                error_details.append(detail)
-                log.exception(f"Unexpected error on product {i}")
-                continue
 
         # Final report
         icon = "✅" if failed == 0 else "⚠️"
-        report = (
+        await status_msg.edit_text(
             f"{icon} *Done!*\n\n"
             f"📮 Posted: *{posted}* product(s) to channel\n"
             f"❌ Failed: *{failed}*\n"
-            f"📊 Gemini quota remaining: *{rate_limiter.remaining_today}/{GEMINI_RPD}*"
+            f"📊 Gemini quota remaining: *{rate_limiter.remaining_today}/{GEMINI_RPD}*",
+            parse_mode=ParseMode.MARKDOWN
         )
-        await status_msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
-
-        # Send the actual error reasons as a separate message so failures are never silent
-        # (plain text, no parse_mode — raw API error text could contain Markdown special chars)
-        if error_details:
-            error_text = "🔍 Failure details:\n\n" + "\n\n".join(
-                f"• {d[:300]}" for d in error_details
-            )
-            if len(error_text) > 4000:
-                error_text = error_text[:4000] + "…"
-            await update.message.reply_text(error_text)
 
     except Exception as e:
         log.exception("Unexpected error")
@@ -855,31 +576,6 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-# ── Template selection callback (applies to the whole ZIP batch) ──────────────
-async def handle_template_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if not is_allowed(query.from_user.id):
-        return
-
-    try:
-        _, tmpl_name, batch_key = query.data.split("::", 2)
-    except ValueError:
-        await query.edit_message_text("⚠️ This button has expired.")
-        return
-
-    pending = ctx.bot_data.get("pending_batches", {}).get(batch_key)
-    if not pending:
-        await query.edit_message_text("⚠️ This session has expired (bot may have restarted). Please resend the ZIP.")
-        return
-
-    pending["template"] = tmpl_name
-    event = pending.get("event")
-    if event:
-        event.set()
-    # The main handle_zip loop takes over from here and edits status_msg itself.
-
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     log.info("Starting Smart Product Poster bot…")
@@ -887,14 +583,10 @@ def main():
     if not load_shop_config():
         log.warning("⚠️  shop.json not found — bot will warn users until it's created.")
 
-    app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
+    app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("quota", cmd_quota))
     app.add_handler(CommandHandler("shop",  cmd_shop))
-    app.add_handler(CommandHandler("newtemplate", cmd_newtemplate))
-    app.add_handler(CommandHandler("templates",   cmd_templates))
-    app.add_handler(CommandHandler("deltemplate", cmd_deltemplate))
-    app.add_handler(CallbackQueryHandler(handle_template_choice, pattern=r"^batchtmpl::"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_zip))
 
     log.info("Bot is running. Send a ZIP file to start.")
@@ -902,4 +594,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
