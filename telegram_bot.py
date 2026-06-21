@@ -1,3 +1,4 @@
+```python
 #!/usr/bin/env python3
 """
 Telegram ZIP Bot
@@ -129,7 +130,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -142,7 +143,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     raise RuntimeError("Exhausted Gemini retries")
 
 def ai_group_images(image_paths: list) -> list:
-    """Passes all images to Gemini for structural clustering with strict position rules."""
+    """Passes all images to Gemini for structural clustering with strict position and color rules."""
     parts = []
     for i, path in enumerate(image_paths):
         parts.append(types.Part.from_text(text=f"Image Index: {i}"))
@@ -150,25 +151,21 @@ def ai_group_images(image_paths: list) -> list:
         
     prompt = """
     You are an expert sports apparel merchandiser. Look at all the provided images.
-
     Group the images that show the EXACT same physical product.
 
-    CRITERIA FOR GROUPING:
-    - Group images that are clearly the same item (e.g., the same team jersey or boot model), even if the lighting makes the color appear slightly different.
-    - If images show clearly different colorways or teams, they should be in DIFFERENT groups.
-    - Use all visual cues available: patterns, silhouettes, trims, and color blocks. DO NOT force images into separate groups just because they lack a brand logo.
+    CRITICAL GROUPING RULES (DO NOT FAIL THESE):
+    1. STRICT COLOR MATCHING: If Image A is RED and Image B is WHITE, they are DIFFERENT products. NEVER group different colors together, even if they are the exact same brand or design template. Color is the #1 deciding factor.
+    2. FRONT & BACK PAIRING: A back view of a shirt belongs ONLY with the front view of the EXACT SAME COLOR and pattern. Do not mix colors!
+
+    CRITICAL SORTING RULES (WITHIN EACH GROUP):
+    You must distinguish between "3D Renders" (pure white background, invisible ghost mannequin) and "Real Photos" (flat-lays on grey floor, wrinkles, visible shorts next to shirt).
     
-    CRITICAL SORTING RULES:
-    You must distinguish between "3D Renders" and "Real Photos" based on these visual clues:
-    - 3D Renders: Have a pure white background, stand upright (ghost mannequin), and often have the "KOS" logo in the corner.
-    - Real Photos: Are flat-lays on a greyish floor/surface, have visible fabric wrinkles, and often show the shirt and shorts laid out side-by-side.
+    For each valid product group, identify the image indices for:
+    - "front_view": MUST be the Front-facing 3D Render (white background). IF AND ONLY IF no 3D render exists for this specific colorway, use the best front-facing real photo.
+    - "back_view": MUST be the Back-facing 3D Render. IF AND ONLY IF no back 3D render exists, use the back real photo. (Use null if there is no back view).
+    - "other_photos": Put ALL remaining photos (like the grey flat-lays if renders were used, close-ups, shorts alone) in this array.
 
     EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output.
-
-    For each product group, identify the image indices for:
-    - "front_view": MUST be the Front-facing 3D Render (white background). NEVER put a flat-lay real photo here if a 3D render exists.
-    - "back_view": MUST be the Back-facing 3D Render (white background). (Use null if there is no back view).
-    - "other_photos": Put ALL Real Photos (flat-lays on grey backgrounds) and any remaining images in this array.
 
     Return ONLY a valid JSON array of objects. Example:
     [
@@ -296,30 +293,36 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
     profile = CATEGORY_PROFILES.get(category, CATEGORY_PROFILES["jersey"])
     sizes   = cfg.get(profile["sizes_key"]) or cfg.get("sizes") or profile["default_sizes"]
 
-    # Use the selected template as the exact blueprint, filling in the shop details
     if tmpl_text:
-        example = (
-            f"=== USER PREFERRED TEMPLATE ===\n{tmpl_text}\n=== END TEMPLATE ===\n\n"
-            f"Please write the post using the EXACT structure, emojis, and formatting style provided "
-            f"in the template above. Adapt the product name to match the image, and ensure the "
-            f"price ({price}), sizes ({sizes}), delivery ({delivery}), and links are included:\n"
-            f"{uzum_line}{tg_line}{admin}"
+        return (
+            f"You are a product copywriter for a sportswear shop.\n"
+            f"Look at the product image(s) and write a Telegram post in {lang}.\n\n"
+            f"Here is the CUSTOM TEMPLATE you must follow strictly:\n"
+            f"---------------------\n"
+            f"{tmpl_text}\n"
+            f"---------------------\n\n"
+            f"CRITICAL RULES:\n"
+            f"1. Use the EXACT structure, emojis, and text layout from the custom template.\n"
+            f"2. Adapt the product name on the very first line to match the visual features of the image (e.g. model name and color).\n"
+            f"3. Ensure shop details are injected if missing (Sizes: {sizes}, Price: {price}, Delivery: {delivery}).\n"
+            f"4. Always append the shop links at the very bottom:\n{uzum_line}{tg_line}{admin}\n"
+            f"5. DO NOT use brand names (like Adidas, Nike).\n"
+            f"6. DO NOT write two separate descriptions. Output ONLY the final completed template."
         )
     else:
         example = profile["example"].format(
             sizes=sizes, delivery=delivery, price=price,
             uzum_line=uzum_line, tg_line=tg_line, admin=admin
         )
-
-    return (
-        f"You are a product copywriter for a sportswear shop.\n"
-        f"Look at the product image(s) and write a Telegram post in {lang} "
-        f"EXACTLY following this style:\n\n{example}\n\nRules:\n"
-        f"- First line: ONLY the model name + color. DO NOT use brand names in the title or description.\n"
-        f"- Emoji bullets for each feature\n"
-        f"- Use wording appropriate for this exact product type.\n"
-        f"- Output ONLY the post text, no markdown, no backticks"
-    )
+        return (
+            f"You are a product copywriter for a sportswear shop.\n"
+            f"Look at the product image(s) and write a Telegram post in {lang} "
+            f"EXACTLY following this style:\n\n{example}\n\nRules:\n"
+            f"- First line: ONLY the model name + color. DO NOT use brand names in the title or description.\n"
+            f"- Emoji bullets for each feature\n"
+            f"- Use wording appropriate for this exact product type.\n"
+            f"- Output ONLY the post text, no markdown, no backticks"
+        )
 
 def generate_description(image_paths: list, cfg: dict, tmpl_text: str = "") -> str:
     category = detect_product_category(image_paths)
@@ -328,7 +331,6 @@ def generate_description(image_paths: list, cfg: dict, tmpl_text: str = "") -> s
     for path in image_paths[:4]:
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
         
-    # Pass the custom template text into the prompt builder
     parts.append(types.Part.from_text(text=build_caption_prompt(cfg, category, tmpl_text)))
     return gemini_call(parts)
 
@@ -467,7 +469,6 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Download via Telethon client bypassing Bot API limit
-        # Use start() explicitly with BOT_TOKEN to prevent terminal prompts
         await telethon_client.start(bot_token=BOT_TOKEN)
         telethon_msg = await telethon_client.get_messages(update.effective_chat.id, ids=update.message.message_id)
         await telethon_client.download_media(telethon_msg.media, file=zip_path)
@@ -505,7 +506,6 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 await status_msg.edit_text(f"⏳ Processing product *{i}/{total}*…", parse_mode=ParseMode.MARKDOWN)
                 
-                # Pass the template text into the description generator so it serves as the base style
                 caption = await loop.run_in_executor(None, generate_description, images, cfg, tmpl_text)
 
                 ok_all, post_errors = True, []
