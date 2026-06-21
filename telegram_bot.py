@@ -467,9 +467,10 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         # Download via Telethon client bypassing Bot API limit
-        async with telethon_client:
-            telethon_msg = await telethon_client.get_messages(update.effective_chat.id, ids=update.message.message_id)
-            await telethon_client.download_media(telethon_msg.media, file=zip_path)
+        # Use start() explicitly with BOT_TOKEN to prevent terminal prompts
+        await telethon_client.start(bot_token=BOT_TOKEN)
+        telethon_msg = await telethon_client.get_messages(update.effective_chat.id, ids=update.message.message_id)
+        await telethon_client.download_media(telethon_msg.media, file=zip_path)
 
         await status_msg.edit_text(f"🤖 Analyzing photos and grouping...", parse_mode=ParseMode.MARKDOWN)
 
@@ -564,4 +565,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
