@@ -1,10 +1,11 @@
+```python
 #!/usr/bin/env python3
 """
 Telegram ZIP Bot
-- You send a ZIP file in private chat
-- Bot auto-groups photos by product using Gemini Vision
-- Search Mode: Analyzes micro-details to prevent mixing models
+- Auto-groups photos by product using Gemini Vision
+- Search Mode: Analyzes collars (sock vs no sock), colors, and micro-details
 - Caps albums at 10 images, strictly puts infographics last
+- Excludes color/season from generated titles
 - Applies custom user-selected description templates naturally
 """
 
@@ -129,7 +130,6 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     client = genai.Client(api_key=GEMINI_KEY)
     for attempt in range(1, max_retries + 1):
         try:
-            # UPGRADED to standard flash model for high visual accuracy
             response = client.models.generate_content(
                 model="gemini-3.1-flash-lite", contents=parts)
             return response.text.strip()
@@ -158,6 +158,7 @@ def ai_group_images(image_paths: list) -> list:
     1. DIFFERENT MODELS = DIFFERENT GROUPS. (A Nike Mercurial is NOT a Nike Phantom).
     2. DIFFERENT COLORS = DIFFERENT GROUPS.
     3. DIFFERENT LOGO/ACCENT COLORS = DIFFERENT GROUPS. A beige boot with a GREEN logo is a completely different product from a beige boot with a GOLD logo. Check the swoosh and soles closely!
+    4. BOOT COLLAR / SOCK DESIGN: This is extremely important. For footwear, a boot WITH a built-in ankle sock (high-top) is a COMPLETELY DIFFERENT product from the exact same color boot WITHOUT a sock (low-cut). Never mix sock and no-sock boots in the same group!
 
     CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
     - "3D Renders": Clean studio shots on a pure white background (floating boots, ghost mannequins). NO text.
@@ -165,7 +166,7 @@ def ai_group_images(image_paths: list) -> list:
     - "Infographics": ANY image that contains TEXT, labels, dimensions, grass icons, Russian words, OR multiple angles stitched into a square collage.
 
     For each product group, you MUST provide:
-    - "model_analysis": Think step-by-step. Describe the base color, logo color, and sole. (e.g., "Red Mercurial with black swoosh"). This stops you from mixing items!
+    - "model_analysis": Think step-by-step. Describe the base color, logo color, sole, and COLLAR TYPE (sock vs no sock). (e.g., "Beige Phantom, low-cut no sock, green swoosh"). This stops you from mixing items!
     - "front_view": Index of the Front 3D Render (pure white background, NO text). If none, use the best front Real Photo. NEVER use an Infographic here.
     - "back_view": Index of the Back/Side 3D Render. Use null if none. NEVER use an Infographic here.
     - "real_photos": Array of indices for ALL Real Photos.
@@ -176,7 +177,7 @@ def ai_group_images(image_paths: list) -> list:
     Return ONLY a valid JSON array of objects. Example:
     [
       {
-        "model_analysis": "Beige Phantom with GREEN swoosh",
+        "model_analysis": "Beige Phantom with GREEN swoosh, WITH sock",
         "front_view": 2,
         "back_view": 5,
         "real_photos": [0, 3],
@@ -327,8 +328,8 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
             f"---------------------\n\n"
             f"CRITICAL RULES:\n"
             f"1. Use the EXACT structure, emojis, and text layout from the custom template.\n"
-            f"2. IDENTIFY THE MODEL: Look at the images and identify the specific model name (e.g. 'Phantom', 'Mercurial'). Put this model name and color on the very first line.\n"
-            f"3. DO NOT use parent brand names (like 'Adidas', 'Nike'), ONLY the specific model line.\n"
+            f"2. IDENTIFY THE MODEL: Look at the images and identify the specific model line (e.g. 'Phantom', 'Mercurial'). Put ONLY this model name on the very first line.\n"
+            f"3. STRICT OMISSIONS: DO NOT include the color of the item. DO NOT include the season or year (e.g. '2024'). DO NOT use parent brand names (like 'Adidas', 'Nike').\n"
             f"4. Ensure shop details are injected (Sizes: {sizes}, Price: {price}, Delivery: {delivery}).\n"
             f"5. Always append the shop links at the very bottom:\n{uzum_line}{tg_line}{admin}\n"
             f"6. Output ONLY ONE final completed template."
@@ -342,7 +343,7 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
             f"You are a product copywriter for a sportswear shop.\n"
             f"Look at the product image(s) and write a Telegram post in {lang} "
             f"EXACTLY following this style:\n\n{example}\n\nRules:\n"
-            f"- First line: IDENTIFY the specific model name (e.g. 'Phantom', 'Mercurial') + color. DO NOT use parent brand names.\n"
+            f"- First line: IDENTIFY the specific model name ONLY (e.g. 'Phantom', 'Mercurial'). DO NOT include colors, seasons, years, or parent brand names.\n"
             f"- Emoji bullets for each feature\n"
             f"- Output ONLY the post text, no markdown, no backticks"
         )
@@ -528,7 +529,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 await status_msg.edit_text(f"⏳ Processing product *{i}/{total}*…", parse_mode=ParseMode.MARKDOWN)
                 
-                # We feed tmpl_text into generate_description, preventing duplicate descriptions
+                # Pass the template directly into the AI generation prompt
                 caption = await loop.run_in_executor(None, generate_description, images, cfg, tmpl_text)
 
                 ok_all, post_errors = True, []
