@@ -3,7 +3,7 @@
 Telegram ZIP Bot
 - You send a ZIP file in private chat
 - Bot auto-groups photos by product using Gemini Vision
-- Posts each product as a separate album to your channel
+- Caps albums at 10 images, strict sorting, single infographic
 - Applies custom user-selected description templates
 """
 
@@ -40,8 +40,8 @@ except ImportError:
     sys.exit("❌  Run:  pip install Pillow")
 
 # ── Config (from environment variables) ───────────────────────────────────────
-API_ID         = int(os.environ["TELEGRAM_API_ID"])      # From my.telegram.org
-API_HASH       = os.environ["TELEGRAM_API_HASH"]        # From my.telegram.org
+API_ID         = int(os.environ["TELEGRAM_API_ID"])      
+API_HASH       = os.environ["TELEGRAM_API_HASH"]        
 BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]    
 CHANNEL_ID     = os.environ["TELEGRAM_CHAT_ID"]      
 GEMINI_KEY     = os.environ["GEMINI_API_KEY"]
@@ -142,7 +142,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     raise RuntimeError("Exhausted Gemini retries")
 
 def ai_group_images(image_paths: list) -> list:
-    """Passes all images to Gemini for structural clustering with strict position and color rules."""
+    """Passes all images to Gemini for structural clustering with strict sorting and limits."""
     parts = []
     for i, path in enumerate(image_paths):
         parts.append(types.Part.from_text(text=f"Image Index: {i}"))
@@ -153,16 +153,23 @@ def ai_group_images(image_paths: list) -> list:
     Group the images that show the EXACT same physical product.
 
     CRITICAL GROUPING RULES (DO NOT FAIL THESE):
-    1. STRICT COLOR MATCHING: If Image A is RED and Image B is WHITE, they are DIFFERENT products. NEVER group different colors together, even if they are the exact same brand or design template. Color is the #1 deciding factor.
-    2. FRONT & BACK PAIRING: A back view of a shirt belongs ONLY with the front view of the EXACT SAME COLOR and pattern. Do not mix colors!
+    1. STRICT COLOR/COLORWAY MATCHING: Color is the #1 deciding factor. 
+       - If Image A is a RED shirt and Image B is a WHITE shirt, they are DIFFERENT products. 
+       - For footwear: If one boot is Black/Beige and another is Black/White, they are DIFFERENT colorways and MUST be in separate groups.
+       - NEVER group different colors/colorways together, even if they are the exact same brand or design model.
+    2. FRONT & BACK PAIRING: A back view belongs ONLY with the front view of the EXACT SAME COLOR. Do not mix colors!
 
-    CRITICAL SORTING RULES (WITHIN EACH GROUP):
-    You must distinguish between "3D Renders" (pure white background, invisible ghost mannequin) and "Real Photos" (flat-lays on grey floor, wrinkles, visible shorts next to shirt).
-    
+    CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
+    You must classify the images into these distinct categories to sort them correctly:
+    - "3D Renders": Clean studio shots on a pure white background (ghost mannequin, floating boots). NO promotional text.
+    - "Infographics": Images containing promotional text, specs, size charts, or feature callouts (e.g., lines pointing to "Texture", "Collar"). DO NOT confuse these with regular 3D renders.
+    - "Real Photos": Photos showing the physical item on a floor, table, or a person wearing it (wrinkles, shadows, visible background).
+
     For each valid product group, identify the image indices for:
-    - "front_view": MUST be the Front-facing 3D Render (white background). IF AND ONLY IF no 3D render exists for this specific colorway, use the best front-facing real photo.
-    - "back_view": MUST be the Back-facing 3D Render. IF AND ONLY IF no back 3D render exists, use the back real photo. (Use null if there is no back view).
-    - "other_photos": Put ALL remaining photos (like the grey flat-lays if renders were used, close-ups, shorts alone) in this array.
+    - "front_view": MUST be the Front-facing 3D Render (white background, NO text). IF AND ONLY IF no 3D render exists, use the best front-facing real photo.
+    - "back_view": MUST be the Back-facing 3D Render. Use null if there is no back view.
+    - "infographics": Array of indices for ALL infographic/text-callout images.
+    - "real_photos": Array of indices for ALL Real Photos.
 
     EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output.
 
@@ -171,7 +178,8 @@ def ai_group_images(image_paths: list) -> list:
       {
         "front_view": 2,
         "back_view": 5,
-        "other_photos": [0, 1]
+        "infographics": [1, 4],
+        "real_photos": [0, 3]
       }
     ]
     Do not include any markdown, backticks, or explanations. Just the JSON array.
@@ -198,22 +206,38 @@ def ai_group_images(image_paths: list) -> list:
         current_group_paths = []
         
         front_idx = group.get("front_view")
-        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths) and front_idx not in seen_indices:
-            current_group_paths.append(image_paths[front_idx])
-            seen_indices.add(front_idx)
-            
         back_idx = group.get("back_view")
-        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx not in seen_indices:
-            current_group_paths.append(image_paths[back_idx])
-            seen_indices.add(back_idx)
+        infographics = group.get("infographics", []) or []
+        real_photos = group.get("real_photos", []) or []
+        other_photos = group.get("other_photos", []) or [] # Catch-all just in case
+        
+        # Mark all indices in this group as seen so the fallback logic doesn't orphan them
+        for idx in [front_idx, back_idx] + infographics + real_photos + other_photos:
+            if isinstance(idx, int):
+                seen_indices.add(idx)
+
+        # 1. Force Front View
+        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths):
+            current_group_paths.append(image_paths[front_idx])
             
-        for other_idx in group.get("other_photos", []) or []:
-            if isinstance(other_idx, int) and 0 <= other_idx < len(image_paths) and other_idx not in seen_indices:
-                current_group_paths.append(image_paths[other_idx])
-                seen_indices.add(other_idx)
+        # 2. Force Back View
+        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx != front_idx:
+            current_group_paths.append(image_paths[back_idx])
+            
+        # 3. Exactly ONE Infographic (User request: "use only one infographic image")
+        for idx in infographics:
+            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
+                current_group_paths.append(image_paths[idx])
+                break # Stop after adding one
                 
+        # 4. Add Real Photos
+        for idx in real_photos + other_photos:
+            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
+                current_group_paths.append(image_paths[idx])
+                
+        # 5. Cap at MAX_ALBUM_SIZE (10) to skip excess images, then add to results
         if current_group_paths:
-            result.append(current_group_paths)
+            result.append(current_group_paths[:MAX_ALBUM_SIZE])
 
     missing = [i for i in range(len(image_paths)) if i not in seen_indices]
     if missing:
