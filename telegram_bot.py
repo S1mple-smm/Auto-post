@@ -131,7 +131,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
         try:
             # UPGRADED to standard flash model for high visual accuracy
             response = client.models.generate_content(
-                model="gemini-2.5-flash", contents=parts)
+                model="gemini-3.5-flash", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
