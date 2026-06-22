@@ -161,14 +161,14 @@ def ai_group_images(image_paths: list) -> list:
 
     CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
     You must classify the images into these distinct categories to sort them correctly:
+     - "Infographics": Images containing promotional text, specs, size charts, or feature callouts (e.g., lines pointing to "Texture", "Collar"). DO NOT confuse these with regular 3D renders.
     - "3D Renders": Clean studio shots on a pure white background (ghost mannequin, floating boots). NO promotional text.
-    - "Infographics": Images containing promotional text, specs, size charts, or feature callouts (e.g., lines pointing to "Texture", "Collar"). DO NOT confuse these with regular 3D renders.
     - "Real Photos": Photos showing the physical item on a floor, table, or a person wearing it (wrinkles, shadows, visible background).
 
     For each valid product group, identify the image indices for:
+    - "infographics": Array of indices for ALL infographic/text-callout images.
     - "front_view": MUST be the Front-facing 3D Render (white background, NO text). IF AND ONLY IF no 3D render exists, use the best front-facing real photo.
     - "back_view": MUST be the Back-facing 3D Render. Use null if there is no back view.
-    - "infographics": Array of indices for ALL infographic/text-callout images.
     - "real_photos": Array of indices for ALL Real Photos.
 
     EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output.
@@ -176,9 +176,9 @@ def ai_group_images(image_paths: list) -> list:
     Return ONLY a valid JSON array of objects. Example:
     [
       {
+        "infographics": [1, 4],
         "front_view": 2,
         "back_view": 5,
-        "infographics": [1, 4],
         "real_photos": [0, 3]
       }
     ]
