@@ -2,9 +2,10 @@
 """
 Telegram ZIP Bot
 - You send a ZIP file in private chat
-- Bot auto-groups photos by product using Gemini Vision (with Model Identification)
-- Caps albums at 10 images, strict sorting, single infographic
-- Applies custom user-selected description templates
+- Bot auto-groups photos by product using Gemini Vision
+- Search Mode: Analyzes micro-details to prevent mixing models
+- Caps albums at 10 images, strictly puts infographics last
+- Applies custom user-selected description templates naturally
 """
 
 import os, sys, json, asyncio, zipfile, shutil, io, time, logging, re
@@ -128,8 +129,9 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     client = genai.Client(api_key=GEMINI_KEY)
     for attempt in range(1, max_retries + 1):
         try:
+            # UPGRADED to standard flash model for high visual accuracy
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -142,42 +144,43 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     raise RuntimeError("Exhausted Gemini retries")
 
 def ai_group_images(image_paths: list) -> list:
-    """Passes all images to Gemini for structural clustering with model identification."""
+    """Passes all images to Gemini for highly strict grouping and sorting."""
     parts = []
     for i, path in enumerate(image_paths):
         parts.append(types.Part.from_text(text=f"Image Index: {i}"))
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
         
     prompt = """
-    You are an expert sports apparel merchandiser. Look at all the provided images.
+    You are an expert sportswear authenticator. Look at all the provided images.
     Group the images that show the EXACT same physical product.
 
-    CRITICAL GROUPING RULES (DO NOT FAIL THESE):
-    1. Look at MICRO-DETAILS! A boot with a GREEN swoosh/logo is a completely different product from a boot with a GOLD swoosh/logo. 
-    2. NEVER group different colorways together. Even if they are the exact same shoe model, different colored trims = DIFFERENT groups.
+    CRITICAL GROUPING RULES - SEARCH FOR MICRO-DETAILS:
+    1. DIFFERENT MODELS = DIFFERENT GROUPS. (A Nike Mercurial is NOT a Nike Phantom).
+    2. DIFFERENT COLORS = DIFFERENT GROUPS.
+    3. DIFFERENT LOGO/ACCENT COLORS = DIFFERENT GROUPS. A beige boot with a GREEN logo is a completely different product from a beige boot with a GOLD logo. Check the swoosh and soles closely!
 
     CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
-    - "3D Renders": Clean studio shots on a pure white background (floating boots, ghost mannequins). NO text, NO collages.
-    - "Infographics": ANY image that contains PROMOTIONAL TEXT, labels, dimensions, OR multiple angles stitched together into a single square collage.
+    - "3D Renders": Clean studio shots on a pure white background (floating boots, ghost mannequins). NO text.
     - "Real Photos": Photos on a floor, grass, held in hands, or showing wrinkles/shadows. NO text.
+    - "Infographics": ANY image that contains TEXT, labels, dimensions, grass icons, Russian words, OR multiple angles stitched into a square collage.
 
-    For each product group, provide:
-    - "model_identity": Think step-by-step. Write the specific model and color details (e.g., "Phantom Black/Beige with Green Logo") to ensure you don't mix it with similar items.
-    - "front_view": Index of the Front-facing 3D Render (white background, NO text). If none, use the best front real photo.
-    - "back_view": Index of the Back/Side 3D Render. Use null if none.
-    - "infographics": Array of indices for ALL infographic/collage/text images.
+    For each product group, you MUST provide:
+    - "model_analysis": Think step-by-step. Describe the base color, logo color, and sole. (e.g., "Red Mercurial with black swoosh"). This stops you from mixing items!
+    - "front_view": Index of the Front 3D Render (pure white background, NO text). If none, use the best front Real Photo. NEVER use an Infographic here.
+    - "back_view": Index of the Back/Side 3D Render. Use null if none. NEVER use an Infographic here.
     - "real_photos": Array of indices for ALL Real Photos.
+    - "infographics": Array of indices for ALL Infographics/Collages.
 
     EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output.
 
     Return ONLY a valid JSON array of objects. Example:
     [
       {
-        "model_identity": "Phantom Black/Beige Green Logo",
+        "model_analysis": "Beige Phantom with GREEN swoosh",
         "front_view": 2,
         "back_view": 5,
-        "infographics": [1, 4],
-        "real_photos": [0, 3]
+        "real_photos": [0, 3],
+        "infographics": [1, 4]
       }
     ]
     Do not include any markdown, backticks, or explanations. Just the JSON array.
@@ -205,11 +208,12 @@ def ai_group_images(image_paths: list) -> list:
         
         front_idx = group.get("front_view")
         back_idx = group.get("back_view")
-        infographics = group.get("infographics", []) or []
         real_photos = group.get("real_photos", []) or []
+        infographics = group.get("infographics", []) or []
         other_photos = group.get("other_photos", []) or [] 
         
-        for idx in [front_idx, back_idx] + infographics + real_photos + other_photos:
+        # Mark all as seen
+        for idx in [front_idx, back_idx] + real_photos + infographics + other_photos:
             if isinstance(idx, int):
                 seen_indices.add(idx)
 
@@ -221,21 +225,20 @@ def ai_group_images(image_paths: list) -> list:
         if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx != front_idx:
             current_group_paths.append(image_paths[back_idx])
             
-        # 3. Exactly ONE Infographic
+        # 3. Add Real Photos
+        for idx in real_photos + other_photos:
+            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
+                current_group_paths.append(image_paths[idx])
+                
+        # 4. Add Exactly ONE Infographic at the VERY END of the list
         for idx in infographics:
             if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
                 current_group_paths.append(image_paths[idx])
                 break 
                 
-        # 4. Add Real Photos
-        for idx in real_photos + other_photos:
-            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
-                current_group_paths.append(image_paths[idx])
-                
         # 5. Strictly discard anything over MAX_ALBUM_SIZE (10)
         if current_group_paths:
-            final_album = current_group_paths[:MAX_ALBUM_SIZE]
-            result.append(final_album)
+            result.append(current_group_paths[:MAX_ALBUM_SIZE])
 
     missing = [i for i in range(len(image_paths)) if i not in seen_indices]
     if missing:
@@ -324,11 +327,11 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
             f"---------------------\n\n"
             f"CRITICAL RULES:\n"
             f"1. Use the EXACT structure, emojis, and text layout from the custom template.\n"
-            f"2. IDENTIFY THE MODEL: Look at the images and identify the specific model name (e.g. 'Phantom', 'Mercurial', 'F50', 'Predator'). Put this model name and color on the very first line.\n"
+            f"2. IDENTIFY THE MODEL: Look at the images and identify the specific model name (e.g. 'Phantom', 'Mercurial'). Put this model name and color on the very first line.\n"
             f"3. DO NOT use parent brand names (like 'Adidas', 'Nike'), ONLY the specific model line.\n"
             f"4. Ensure shop details are injected (Sizes: {sizes}, Price: {price}, Delivery: {delivery}).\n"
             f"5. Always append the shop links at the very bottom:\n{uzum_line}{tg_line}{admin}\n"
-            f"6. Output ONLY the final completed template."
+            f"6. Output ONLY ONE final completed template."
         )
     else:
         example = profile["example"].format(
@@ -339,7 +342,7 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
             f"You are a product copywriter for a sportswear shop.\n"
             f"Look at the product image(s) and write a Telegram post in {lang} "
             f"EXACTLY following this style:\n\n{example}\n\nRules:\n"
-            f"- First line: IDENTIFY the specific model name (e.g. 'Phantom', 'Mercurial') + color. DO NOT use parent brand names (like Adidas/Nike).\n"
+            f"- First line: IDENTIFY the specific model name (e.g. 'Phantom', 'Mercurial') + color. DO NOT use parent brand names.\n"
             f"- Emoji bullets for each feature\n"
             f"- Output ONLY the post text, no markdown, no backticks"
         )
@@ -525,10 +528,10 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             try:
                 await status_msg.edit_text(f"⏳ Processing product *{i}/{total}*…", parse_mode=ParseMode.MARKDOWN)
                 
+                # We feed tmpl_text into generate_description, preventing duplicate descriptions
                 caption = await loop.run_in_executor(None, generate_description, images, cfg, tmpl_text)
 
                 ok_all, post_errors = True, []
-                # Images are already capped at 10 (MAX_ALBUM_SIZE) so this loop runs exactly once
                 for chunk_start in range(0, len(images), MAX_ALBUM_SIZE):
                     chunk = images[chunk_start:chunk_start + MAX_ALBUM_SIZE]
                     ok, err_msg = await post_album_to_channel(ctx.bot, chunk, caption if chunk_start == 0 else "")
