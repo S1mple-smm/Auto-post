@@ -179,24 +179,24 @@ def ai_group_images(image_paths: list) -> list:
 
     CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
     - "Infographics": ANY image that contains TEXT, labels, dimensions, grass icons, Russian words, OR multiple angles stitched into a square collage. These are the MOST IMPORTANT images and must be listed first.
-    - "Wide Front Shot": A wide/landscape format real photo showing the FRONT of the product with a clean or simple background. NO text. These come right after infographics.
-    - "Wide Back Shot": A wide/landscape format real photo showing the BACK or SIDE of the product with a clean or simple background. NO text. These come after wide front shots.
-    - "Front 3D Render": A single floating product shot from the FRONT on a pure white background. NO text whatsoever.
-    - "Back 3D Render": A single floating product shot from the BACK or SIDE on a pure white background. NO text whatsoever.
-    - "Basic Photos": Plain, clean studio shots on a white background with NO text — simple and minimal. NOT infographics. These are less interesting and go near the end.
-    - "Real Photos": Photos taken in real life — on a floor, grass, held in hands, showing wrinkles/shadows/environment. NO text. NOT wide shots.
-    - "Floor Photos": Images where the product is placed directly on a floor, ground, or grass surface. These go last.
+    - "Front 3D Render": A single floating product shot from the FRONT on a PURE WHITE background. NO text whatsoever. The product appears to "float" with no floor or shadow visible.
+    - "Back 3D Render": A single floating product shot from the BACK or SIDE on a PURE WHITE background. NO text whatsoever. The product appears to "float" with no floor or shadow visible.
+    - "Wide Front Shot": A wide/landscape photo showing the FRONT-FACING side of the product. May have a simple background but NOT pure white floating. The product is clearly facing toward the camera. These come right after 3D renders.
+    - "Wide Back Shot": A wide/landscape photo showing the BACK or SIDE of the product. May have a simple background but NOT pure white floating. The product is turned away or sideways. These come after wide front shots.
+    - "Real Photos": Close-up or medium shots taken in real life — held in hands, worn, showing texture/wrinkles. NOT wide format. NOT on a floor/ground surface.
+    - "Basic Photos": Plain, clean studio shots on a white background with NO text — simple and minimal. NOT floating renders. NOT infographics. These are boring and go near the end.
+    - "Floor Photos": ANY image where the product is resting, lying, or standing ON a floor, ground, grass, or any surface below. Even if the shot looks "nice", if the product is ON the ground — it goes here. ALWAYS LAST.
 
     For each product group, you MUST provide ALL of these fields:
     - "model_analysis": Think step-by-step. Describe the base color, logo color, sole, and COLLAR TYPE (sock vs no sock). (e.g., "Beige Phantom, low-cut no sock, green swoosh"). This stops you from mixing items!
     - "infographics": Array of indices for ALL infographic/collage/text images. PUT THESE FIRST — they are the album cover.
-    - "wide_front": Array of indices for wide/landscape format photos showing the FRONT of the product. Come right after infographics.
-    - "wide_back": Array of indices for wide/landscape format photos showing the BACK or SIDE of the product. Come after wide front shots.
-    - "front_view": Single index of the Front 3D Render (pure white background, NO text). If none exists, use null. NEVER use an Infographic or wide shot here.
-    - "back_view": Single index of the Back/Side 3D Render (pure white background, NO text). Use null if none. NEVER use an Infographic or wide shot here.
-    - "real_photos": Array of indices for real-life photos that are NOT wide shots and NOT on floor/ground.
-    - "basic_photos": Array of indices for plain clean white background images with NO text that are NOT the main front or back render. These are simple studio shots.
-    - "floor_photos": Array of indices for images where the product is on a floor or ground surface.
+    - "front_view": Single index of the Front 3D Render (pure white background, product floating, NO text). If none exists, use null. NEVER use an Infographic or wide shot here.
+    - "back_view": Single index of the Back/Side 3D Render (pure white background, product floating, NO text). Use null if none. NEVER use an Infographic or wide shot here.
+    - "wide_front": Array of indices for wide/landscape photos where the FRONT of the product faces the camera. NOT floating on white. NOT on a floor. NOT infographics.
+    - "wide_back": Array of indices for wide/landscape photos where the BACK or SIDE of the product faces the camera. NOT floating on white. NOT on a floor. NOT infographics.
+    - "real_photos": Array of indices for close-up or medium real-life photos NOT in wide format and NOT on a floor/ground.
+    - "basic_photos": Array of indices for plain clean white background images with NO text that are NOT the main floating front or back render.
+    - "floor_photos": Array of indices for ANY image where the product is resting ON a floor, ground, or grass — regardless of angle or quality. THESE ALWAYS GO LAST.
 
     EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE across all fields combined.
 
@@ -205,10 +205,10 @@ def ai_group_images(image_paths: list) -> list:
       {
         "model_analysis": "Beige Phantom with GREEN swoosh, WITH sock",
         "infographics": [1, 4],
-        "wide_front": [7],
-        "wide_back": [8],
         "front_view": 2,
         "back_view": 5,
+        "wide_front": [7],
+        "wide_back": [8],
         "real_photos": [3],
         "basic_photos": [0],
         "floor_photos": [6]
