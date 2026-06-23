@@ -3,10 +3,17 @@
 Telegram ZIP Bot
 - Auto-groups photos by product using Gemini Vision
 - Search Mode: Analyzes collars (sock vs no sock), colors, and micro-details
-- Caps albums at 10 images, strictly puts infographics last
+- Caps albums at 10 images, strictly puts infographics first, and ensures front/back views are prioritized
 - Excludes color/season from generated titles
 - Applies custom user-selected description templates naturally
-- Uses strict JSON parsing and optimized payloads for large batches
+
+IMAGE ORDER PER ALBUM:
+  1. Infographics (text/collage images) — always first for thumbnail
+  2. Front 3D render (pure white bg, no text)
+  3. Back/side 3D render
+  4. Other real photos
+  5. Basic clean white background images (plain studio shots)
+  6. Floor / lifestyle images — always last
 """
 
 import os, sys, json, asyncio, zipfile, shutil, io, time, logging, re
@@ -42,10 +49,10 @@ except ImportError:
     sys.exit("❌  Run:  pip install Pillow")
 
 # ── Config (from environment variables) ───────────────────────────────────────
-API_ID         = int(os.environ["TELEGRAM_API_ID"])      
-API_HASH       = os.environ["TELEGRAM_API_HASH"]        
-BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]    
-CHANNEL_ID     = os.environ["TELEGRAM_CHAT_ID"]      
+API_ID         = int(os.environ["TELEGRAM_API_ID"])
+API_HASH       = os.environ["TELEGRAM_API_HASH"]
+BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
+CHANNEL_ID     = os.environ["TELEGRAM_CHAT_ID"]
 GEMINI_KEY     = os.environ["GEMINI_API_KEY"]
 ALLOWED_USERS  = set(os.getenv("ALLOWED_USER_IDS", "").split(","))
 
@@ -118,30 +125,20 @@ def save_templates(templates: dict):
         json.dump(templates, f, ensure_ascii=False, indent=2)
 
 # ── Gemini helpers ─────────────────────────────────────────────────────────────
-def load_image_bytes(path: str, max_size=(600, 600)) -> bytes:
-    """Optimized to 600x600 for large 20+ image batches to prevent timeouts"""
+def load_image_bytes(path: str, max_size=(800, 800)) -> bytes:
     with PILImage.open(path) as img:
         img.thumbnail(max_size)
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=80)
+        img.convert("RGB").save(buf, format="JPEG", quality=85)
         return buf.getvalue()
 
-def gemini_call(parts: list, max_retries: int = 5, is_json: bool = False) -> str:
+def gemini_call(parts: list, max_retries: int = 5) -> str:
     rate_limiter.wait_if_needed()
     client = genai.Client(api_key=GEMINI_KEY)
-    
-    # Configure strict output modes
-    config = types.GenerateContentConfig(temperature=0.2)
-    if is_json:
-        config.response_mime_type = "application/json"
-
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash", 
-                contents=parts,
-                config=config
-            )
+                model="gemini-3.1-flash-lite", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -154,17 +151,25 @@ def gemini_call(parts: list, max_retries: int = 5, is_json: bool = False) -> str
     raise RuntimeError("Exhausted Gemini retries")
 
 def ai_group_images(image_paths: list) -> list:
-    """Passes all images to Gemini for highly strict grouping and sorting."""
+    """Passes all images to Gemini for highly strict grouping and sorting.
+
+    Final album order per group:
+      1. infographics   — eye-catching collages/text images (album thumbnail)
+      2. front_view     — front 3D render on white bg
+      3. back_view      — back/side 3D render on white bg
+      4. real_photos    — real-life / action photos
+      5. other_photos   — anything uncategorised
+      6. basic_photos   — plain white bg studio shots with NO text (boring, go near end)
+      7. floor_photos   — product lying/standing on floor/grass (go last)
+    """
     parts = []
     for i, path in enumerate(image_paths):
         parts.append(types.Part.from_text(text=f"Image Index: {i}"))
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-        
+
     prompt = """
     You are an expert sportswear authenticator. Look at all the provided images.
     Group the images that show the EXACT same physical product.
-
-    IMPORTANT HINT: You are receiving a large batch of images, but they belong to a SMALL number of distinct products (usually 2 to 6). Group ALL images of the same product together! Do not be afraid to group 5-10 images together if they clearly show the same product.
 
     CRITICAL GROUPING RULES - SEARCH FOR MICRO-DETAILS:
     1. DIFFERENT MODELS = DIFFERENT GROUPS. (A Nike Mercurial is NOT a Nike Phantom).
@@ -173,79 +178,125 @@ def ai_group_images(image_paths: list) -> list:
     4. BOOT COLLAR / SOCK DESIGN: This is extremely important. For footwear, a boot WITH a built-in ankle sock (high-top) is a COMPLETELY DIFFERENT product from the exact same color boot WITHOUT a sock (low-cut). Never mix sock and no-sock boots in the same group!
 
     CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
-    - "3D Renders": Clean studio shots on a pure white background (floating boots, ghost mannequins). NO text.
-    - "Real Photos": Photos on a floor, grass, held in hands, or showing wrinkles/shadows. NO text.
-    - "Infographics": ANY image that contains TEXT, labels, dimensions, grass icons, Russian words, OR multiple angles stitched into a square collage.
+    - "Infographics": ANY image that contains TEXT, labels, dimensions, grass icons, Russian words, OR multiple angles stitched into a square collage. These are the MOST IMPORTANT images and must be listed first.
+    - "Front 3D Render": A single floating product shot from the FRONT on a pure white background. NO text whatsoever.
+    - "Back 3D Render": A single floating product shot from the BACK or SIDE on a pure white background. NO text whatsoever.
+    - "Basic Photos": Plain, clean studio shots on a white background with NO text — simple and minimal. NOT infographics. These are less interesting and go near the end.
+    - "Real Photos": Photos taken in real life — on a floor, grass, held in hands, showing wrinkles/shadows/environment. NO text.
+    - "Floor Photos": Images where the product is placed directly on a floor, ground, or grass surface. These go last.
 
-    For each product group, you MUST provide:
+    For each product group, you MUST provide ALL of these fields:
     - "model_analysis": Think step-by-step. Describe the base color, logo color, sole, and COLLAR TYPE (sock vs no sock). (e.g., "Beige Phantom, low-cut no sock, green swoosh"). This stops you from mixing items!
-    - "front_view": Index of the Front 3D Render (pure white background, NO text). If none, use the best front Real Photo. NEVER use an Infographic here.
-    - "back_view": Index of the Back/Side 3D Render. Use null if none. NEVER use an Infographic here.
-    - "real_photos": Array of indices for ALL Real Photos.
-    - "infographics": Array of indices for ALL Infographics/Collages.
+    - "infographics": Array of indices for ALL infographic/collage/text images. PUT THESE FIRST — they are the album cover.
+    - "front_view": Single index of the Front 3D Render (pure white background, NO text). If none exists, use null. NEVER use an Infographic here.
+    - "back_view": Single index of the Back/Side 3D Render (pure white background, NO text). Use null if none. NEVER use an Infographic here.
+    - "real_photos": Array of indices for real-life photos (not on floor/ground).
+    - "basic_photos": Array of indices for plain clean white background images with NO text that are NOT the main front or back render. These are simple studio shots.
+    - "floor_photos": Array of indices for images where the product is on a floor or ground surface.
 
-    EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output.
+    EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE across all fields combined.
 
-    Return ONLY a valid JSON array of objects.
+    Return ONLY a valid JSON array of objects. Example:
+    [
+      {
+        "model_analysis": "Beige Phantom with GREEN swoosh, WITH sock",
+        "infographics": [1, 4],
+        "front_view": 2,
+        "back_view": 5,
+        "real_photos": [3],
+        "basic_photos": [0],
+        "floor_photos": [6]
+      }
+    ]
+    Do not include any markdown, backticks, or explanations. Just the JSON array.
     """
     parts.append(types.Part.from_text(text=prompt))
-    
+
     log.info(f"Sending {len(image_paths)} images to Gemini for structural clustering...")
-    
+
     try:
-        raw = gemini_call(parts, is_json=True)
-        # Bulletproof JSON extraction
-        start = raw.find('[')
-        end = raw.rfind(']')
-        if start != -1 and end != -1:
-            raw = raw[start:end+1]
-        structured_groups = json.loads(raw)
+        raw = gemini_call(parts)
+        raw = raw.strip().strip("```json").strip("```").strip()
+        match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
+        if match:
+            structured_groups = json.loads(match.group())
+        else:
+            structured_groups = json.loads(raw)
     except Exception as e:
-        log.warning(f"Direct clustering failed ({type(e).__name__}: {e}), falling back to 1 group per image.")
+        log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
         return [[p] for p in image_paths]
-        
+
     result = []
     seen_indices = set()
+
     for group in structured_groups:
         current_group_paths = []
-        
-        front_idx = group.get("front_view")
-        back_idx = group.get("back_view")
-        real_photos = group.get("real_photos", []) or []
+
+        # Extract all categories from Gemini response
+        front_idx    = group.get("front_view")
+        back_idx     = group.get("back_view")
         infographics = group.get("infographics", []) or []
-        other_photos = group.get("other_photos", []) or [] 
-        
-        # Mark all as seen
-        for idx in [front_idx, back_idx] + real_photos + infographics + other_photos:
+        real_photos  = group.get("real_photos", []) or []
+        other_photos = group.get("other_photos", []) or []   # legacy fallback key
+        basic_photos = group.get("basic_photos", []) or []
+        floor_photos = group.get("floor_photos", []) or []
+
+        # Mark all indices as seen to detect missing ones later
+        all_indices = (
+            [front_idx, back_idx]
+            + infographics
+            + real_photos
+            + other_photos
+            + basic_photos
+            + floor_photos
+        )
+        for idx in all_indices:
             if isinstance(idx, int):
                 seen_indices.add(idx)
 
-        # 1. Add Exactly ONE Infographic FIRST (Cover Image)
+        def add(idx):
+            """Safely add an image path by index if valid and not already added."""
+            if isinstance(idx, int) and 0 <= idx < len(image_paths):
+                p = image_paths[idx]
+                if p not in current_group_paths:
+                    current_group_paths.append(p)
+
+        # ── ALBUM ORDER ────────────────────────────────────────────────────────
+        # 1. Infographics FIRST — these become the album thumbnail in Telegram
         for idx in infographics:
-            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
-                current_group_paths.append(image_paths[idx])
-                break 
-                
-        # 2. Add Front View
-        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths) and image_paths[front_idx] not in current_group_paths:
-            current_group_paths.append(image_paths[front_idx])
-            
-        # 3. Add Back View
-        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx != front_idx and image_paths[back_idx] not in current_group_paths:
-            current_group_paths.append(image_paths[back_idx])
-            
-        # 4. Add Real Photos and any remaining photos
-        for idx in real_photos + other_photos:
-            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
-                current_group_paths.append(image_paths[idx])
-                
-        # 5. Strictly discard anything over MAX_ALBUM_SIZE (10)
+            add(idx)
+
+        # 2. Front 3D render
+        add(front_idx)
+
+        # 3. Back / side 3D render
+        add(back_idx)
+
+        # 4. Real-life photos (action, hands, wrinkles, etc.)
+        for idx in real_photos:
+            add(idx)
+
+        # 5. Other / uncategorised photos (legacy fallback)
+        for idx in other_photos:
+            add(idx)
+
+        # 6. Basic clean white background images (plain, no text) — near end
+        for idx in basic_photos:
+            add(idx)
+
+        # 7. Floor / ground / grass images — always last
+        for idx in floor_photos:
+            add(idx)
+        # ──────────────────────────────────────────────────────────────────────
+
+        # Cap at MAX_ALBUM_SIZE and add to results
         if current_group_paths:
             result.append(current_group_paths[:MAX_ALBUM_SIZE])
 
-    # Failsafe: if the AI forgot any images, put them in their own groups
+    # Any image Gemini missed gets its own single-image group
     missing = [i for i in range(len(image_paths)) if i not in seen_indices]
     if missing:
+        log.warning(f"Gemini missed {len(missing)} image(s), adding as solo groups: {missing}")
         for idx in missing:
             result.append([image_paths[idx]])
 
@@ -357,7 +408,7 @@ def generate_description(image_paths: list, cfg: dict, tmpl_text: str = "") -> s
     parts = []
     for path in image_paths[:4]:
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-        
+
     parts.append(types.Part.from_text(text=build_caption_prompt(cfg, category, tmpl_text)))
     return gemini_call(parts)
 
@@ -531,7 +582,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for i, images in enumerate(groups, 1):
             try:
                 await status_msg.edit_text(f"⏳ Processing product *{i}/{total}*…", parse_mode=ParseMode.MARKDOWN)
-                
+
                 # Pass the template directly into the AI generation prompt
                 caption = await loop.run_in_executor(None, generate_description, images, cfg, tmpl_text)
 
