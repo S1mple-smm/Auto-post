@@ -130,7 +130,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash-lite-preview-06-17", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -202,6 +202,15 @@ def ai_group_images(image_paths: list) -> list:
         return [[p] for p in image_paths]
 
     # ── Album assembly — category-aware ordering ───────────────────────────────
+    # Detect category ONCE for the whole batch using several images spread across
+    # the full set — much more reliable than per-group detection on a single image.
+    try:
+        sample = image_paths[::max(1, len(image_paths)//5)][:5]  # up to 5 evenly spaced
+        batch_category = detect_product_category(sample)
+        log.info(f"Batch category detected: {batch_category}")
+    except Exception:
+        batch_category = "jersey"
+
     result = []
     seen_indices = set()
 
@@ -222,18 +231,9 @@ def ai_group_images(image_paths: list) -> list:
                     and 0 <= idx < len(image_paths)
                     and image_paths[idx] not in current)
 
-        # Detect jersey vs boots to decide ordering
-        front_path = (image_paths[front_idx]
-                      if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths)
-                      else None)
-        try:
-            cat = detect_product_category([front_path] if front_path else image_paths[:1])
-        except Exception:
-            cat = "jersey"
-
         current = []
 
-        if cat == "boots":
+        if batch_category == "boots":
             # BOOTS: infographics first → renders (front, back) → real photos
             for idx in infographics:
                 if valid(idx, current): current.append(image_paths[idx])
