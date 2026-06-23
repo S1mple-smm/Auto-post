@@ -179,18 +179,22 @@ def ai_group_images(image_paths: list) -> list:
 
     CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
     - "Infographics": ANY image that contains TEXT, labels, dimensions, grass icons, Russian words, OR multiple angles stitched into a square collage. These are the MOST IMPORTANT images and must be listed first.
+    - "Wide Front Shot": A wide/landscape format real photo showing the FRONT of the product with a clean or simple background. NO text. These come right after infographics.
+    - "Wide Back Shot": A wide/landscape format real photo showing the BACK or SIDE of the product with a clean or simple background. NO text. These come after wide front shots.
     - "Front 3D Render": A single floating product shot from the FRONT on a pure white background. NO text whatsoever.
     - "Back 3D Render": A single floating product shot from the BACK or SIDE on a pure white background. NO text whatsoever.
     - "Basic Photos": Plain, clean studio shots on a white background with NO text — simple and minimal. NOT infographics. These are less interesting and go near the end.
-    - "Real Photos": Photos taken in real life — on a floor, grass, held in hands, showing wrinkles/shadows/environment. NO text.
+    - "Real Photos": Photos taken in real life — on a floor, grass, held in hands, showing wrinkles/shadows/environment. NO text. NOT wide shots.
     - "Floor Photos": Images where the product is placed directly on a floor, ground, or grass surface. These go last.
 
     For each product group, you MUST provide ALL of these fields:
     - "model_analysis": Think step-by-step. Describe the base color, logo color, sole, and COLLAR TYPE (sock vs no sock). (e.g., "Beige Phantom, low-cut no sock, green swoosh"). This stops you from mixing items!
     - "infographics": Array of indices for ALL infographic/collage/text images. PUT THESE FIRST — they are the album cover.
-    - "front_view": Single index of the Front 3D Render (pure white background, NO text). If none exists, use null. NEVER use an Infographic here.
-    - "back_view": Single index of the Back/Side 3D Render (pure white background, NO text). Use null if none. NEVER use an Infographic here.
-    - "real_photos": Array of indices for real-life photos (not on floor/ground).
+    - "wide_front": Array of indices for wide/landscape format photos showing the FRONT of the product. Come right after infographics.
+    - "wide_back": Array of indices for wide/landscape format photos showing the BACK or SIDE of the product. Come after wide front shots.
+    - "front_view": Single index of the Front 3D Render (pure white background, NO text). If none exists, use null. NEVER use an Infographic or wide shot here.
+    - "back_view": Single index of the Back/Side 3D Render (pure white background, NO text). Use null if none. NEVER use an Infographic or wide shot here.
+    - "real_photos": Array of indices for real-life photos that are NOT wide shots and NOT on floor/ground.
     - "basic_photos": Array of indices for plain clean white background images with NO text that are NOT the main front or back render. These are simple studio shots.
     - "floor_photos": Array of indices for images where the product is on a floor or ground surface.
 
@@ -201,6 +205,8 @@ def ai_group_images(image_paths: list) -> list:
       {
         "model_analysis": "Beige Phantom with GREEN swoosh, WITH sock",
         "infographics": [1, 4],
+        "wide_front": [7],
+        "wide_back": [8],
         "front_view": 2,
         "back_view": 5,
         "real_photos": [3],
@@ -236,6 +242,8 @@ def ai_group_images(image_paths: list) -> list:
         front_idx    = group.get("front_view")
         back_idx     = group.get("back_view")
         infographics = group.get("infographics", []) or []
+        wide_front   = group.get("wide_front", []) or []
+        wide_back    = group.get("wide_back", []) or []
         real_photos  = group.get("real_photos", []) or []
         other_photos = group.get("other_photos", []) or []   # legacy fallback key
         basic_photos = group.get("basic_photos", []) or []
@@ -245,6 +253,8 @@ def ai_group_images(image_paths: list) -> list:
         all_indices = (
             [front_idx, back_idx]
             + infographics
+            + wide_front
+            + wide_back
             + real_photos
             + other_photos
             + basic_photos
@@ -272,19 +282,27 @@ def ai_group_images(image_paths: list) -> list:
         # 3. Back / side 3D render
         add(back_idx)
 
-        # 4. Real-life photos (action, hands, wrinkles, etc.)
+        # 4. Wide front shots
+        for idx in wide_front:
+            add(idx)
+
+        # 5. Wide back / side shots
+        for idx in wide_back:
+            add(idx)
+
+        # 6. Real-life photos (action, hands, wrinkles, etc.)
         for idx in real_photos:
             add(idx)
 
-        # 5. Other / uncategorised photos (legacy fallback)
+        # 7. Other / uncategorised photos (legacy fallback)
         for idx in other_photos:
             add(idx)
 
-        # 6. Basic clean white background images (plain, no text) — near end
+        # 8. Basic clean white background images (plain, no text) — near end
         for idx in basic_photos:
             add(idx)
 
-        # 7. Floor / ground / grass images — always last
+        # 9. Floor / ground / grass images — always last
         for idx in floor_photos:
             add(idx)
         # ──────────────────────────────────────────────────────────────────────
