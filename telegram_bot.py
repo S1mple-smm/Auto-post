@@ -3,7 +3,7 @@
 Telegram ZIP Bot
 - Auto-groups photos by product using Gemini Vision
 - Search Mode: Analyzes collars (sock vs no sock), colors, and micro-details
-- Caps albums at 10 images, strictly puts infographics last
+- Caps albums at 10 images, strictly puts ONE infographic FIRST
 - Excludes color/season from generated titles
 - Applies custom user-selected description templates naturally
 """
@@ -130,7 +130,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -217,24 +217,24 @@ def ai_group_images(image_paths: list) -> list:
             if isinstance(idx, int):
                 seen_indices.add(idx)
 
-        # 1. Force Front View
-        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths):
-            current_group_paths.append(image_paths[front_idx])
-            
-        # 2. Force Back View
-        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx != front_idx:
-            current_group_paths.append(image_paths[back_idx])
-            
-        # 3. Add Real Photos
-        for idx in real_photos + other_photos:
-            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
-                current_group_paths.append(image_paths[idx])
-                
-        # 4. Add Exactly ONE Infographic at the VERY END of the list
+        # 1. Add Exactly ONE Infographic FIRST (Cover Image)
         for idx in infographics:
             if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
                 current_group_paths.append(image_paths[idx])
                 break 
+                
+        # 2. Add Front View
+        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths) and image_paths[front_idx] not in current_group_paths:
+            current_group_paths.append(image_paths[front_idx])
+            
+        # 3. Add Back View
+        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx != front_idx and image_paths[back_idx] not in current_group_paths:
+            current_group_paths.append(image_paths[back_idx])
+            
+        # 4. Add Real Photos and any remaining photos
+        for idx in real_photos + other_photos:
+            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
+                current_group_paths.append(image_paths[idx])
                 
         # 5. Strictly discard anything over MAX_ALBUM_SIZE (10)
         if current_group_paths:
