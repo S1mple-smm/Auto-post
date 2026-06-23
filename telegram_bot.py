@@ -41,10 +41,10 @@ except ImportError:
     sys.exit("❌  Run:  pip install Pillow")
 
 # ── Config (from environment variables) ───────────────────────────────────────
-API_ID         = int(os.environ["TELEGRAM_API_ID"])
-API_HASH       = os.environ["TELEGRAM_API_HASH"]
-BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
-CHANNEL_ID     = os.environ["TELEGRAM_CHAT_ID"]
+API_ID         = int(os.environ["TELEGRAM_API_ID"])      
+API_HASH       = os.environ["TELEGRAM_API_HASH"]        
+BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]    
+CHANNEL_ID     = os.environ["TELEGRAM_CHAT_ID"]      
 GEMINI_KEY     = os.environ["GEMINI_API_KEY"]
 ALLOWED_USERS  = set(os.getenv("ALLOWED_USER_IDS", "").split(","))
 
@@ -90,7 +90,7 @@ class RateLimiter:
 
 rate_limiter = RateLimiter(GEMINI_RPM, GEMINI_RPD)
 
-# ── Config Helpers ─────────────────────────────────────────────────────────────
+# ── Config Helpers ──────────────────────────────────────────────────────────────
 def escape_md(text: str) -> str:
     if not text: return text
     for ch in ("_", "*", "`", "["):
@@ -103,7 +103,7 @@ def load_shop_config() -> dict:
             return json.load(f)
     return {}
 
-# ── Description templates ──────────────────────────────────────────────────────
+# ── Description templates ───────────────────────────────────────────────────────
 TEMPLATES_FILE = "templates.json"
 
 def load_templates() -> dict:
@@ -130,7 +130,7 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash-lite-preview-06-17", contents=parts)
+                model="gemini-3.1-flash-lite", contents=parts)
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -148,7 +148,7 @@ def ai_group_images(image_paths: list) -> list:
     for i, path in enumerate(image_paths):
         parts.append(types.Part.from_text(text=f"Image Index: {i}"))
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-
+        
     prompt = """
     You are an expert sportswear authenticator. Look at all the provided images.
     Group the images that show the EXACT same physical product.
@@ -186,9 +186,9 @@ def ai_group_images(image_paths: list) -> list:
     Do not include any markdown, backticks, or explanations. Just the JSON array.
     """
     parts.append(types.Part.from_text(text=prompt))
-
+    
     log.info(f"Sending {len(image_paths)} images to Gemini for structural clustering...")
-
+    
     try:
         raw = gemini_call(parts)
         raw = raw.strip().strip("```json").strip("```").strip()
@@ -200,63 +200,48 @@ def ai_group_images(image_paths: list) -> list:
     except Exception as e:
         log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
         return [[p] for p in image_paths]
-
-    # ── Album assembly — category-aware ordering ───────────────────────────────
-    # Detect category ONCE for the whole batch using several images spread across
-    # the full set — much more reliable than per-group detection on a single image.
-    try:
-        sample = image_paths[::max(1, len(image_paths)//5)][:5]  # up to 5 evenly spaced
-        batch_category = detect_product_category(sample)
-        log.info(f"Batch category detected: {batch_category}")
-    except Exception:
-        batch_category = "jersey"
-
+        
     result = []
     seen_indices = set()
-
     for group in structured_groups:
-        front_idx    = group.get("front_view")
-        back_idx     = group.get("back_view")
-        real_photos  = group.get("real_photos",  []) or []
+        current_group_paths = []
+        
+        front_idx = group.get("front_view")
+        back_idx = group.get("back_view")
+        real_photos = group.get("real_photos", []) or []
         infographics = group.get("infographics", []) or []
-        other_photos = group.get("other_photos", []) or []
-
-        # Mark all mentioned indices as seen so nothing is silently dropped
+        other_photos = group.get("other_photos", []) or [] 
+        
+        # Mark all as seen
         for idx in [front_idx, back_idx] + real_photos + infographics + other_photos:
             if isinstance(idx, int):
                 seen_indices.add(idx)
 
-        def valid(idx, current):
-            return (isinstance(idx, int)
-                    and 0 <= idx < len(image_paths)
-                    and image_paths[idx] not in current)
+        # 1. Force Front View
+        if isinstance(front_idx, int) and 0 <= front_idx < len(image_paths):
+            current_group_paths.append(image_paths[front_idx])
+            
+        # 2. Force Back View
+        if isinstance(back_idx, int) and 0 <= back_idx < len(image_paths) and back_idx != front_idx:
+            current_group_paths.append(image_paths[back_idx])
+            
+        # 3. Add Real Photos
+        for idx in real_photos + other_photos:
+            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
+                current_group_paths.append(image_paths[idx])
+                
+        # 4. Add Exactly ONE Infographic at the VERY END of the list
+        for idx in infographics:
+            if isinstance(idx, int) and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
+                current_group_paths.append(image_paths[idx])
+                break 
+                
+        # 5. Strictly discard anything over MAX_ALBUM_SIZE (10)
+        if current_group_paths:
+            result.append(current_group_paths[:MAX_ALBUM_SIZE])
 
-        current = []
-
-        if batch_category == "boots":
-            # BOOTS: infographics first → renders (front, back) → real photos
-            for idx in infographics:
-                if valid(idx, current): current.append(image_paths[idx])
-            if valid(front_idx, current): current.append(image_paths[front_idx])
-            if valid(back_idx,  current): current.append(image_paths[back_idx])
-            for idx in real_photos + other_photos:
-                if valid(idx, current): current.append(image_paths[idx])
-        else:
-            # JERSEY: renders (front, back) → real/studio photos → infographics last
-            if valid(front_idx, current): current.append(image_paths[front_idx])
-            if valid(back_idx,  current): current.append(image_paths[back_idx])
-            for idx in real_photos + other_photos:
-                if valid(idx, current): current.append(image_paths[idx])
-            for idx in infographics:
-                if valid(idx, current): current.append(image_paths[idx])
-
-        if current:
-            result.append(current[:MAX_ALBUM_SIZE])
-
-    # Safety net: any image Gemini didn't place gets its own group
     missing = [i for i in range(len(image_paths)) if i not in seen_indices]
     if missing:
-        log.warning(f"Grouping left {len(missing)} image(s) unplaced: {missing}")
         for idx in missing:
             result.append([image_paths[idx]])
 
@@ -265,8 +250,7 @@ def ai_group_images(image_paths: list) -> list:
 def detect_product_category(image_paths: list) -> str:
     parts = []
     for path in image_paths[:3]:
-        if path:
-            parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
+        parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
     parts.append(types.Part.from_text(text="""
 Reply with ONLY one word: "jersey" if it's a shirt/kit, "boots" if it's footwear, or "other" if accessory.
 """))
@@ -369,6 +353,7 @@ def generate_description(image_paths: list, cfg: dict, tmpl_text: str = "") -> s
     parts = []
     for path in image_paths[:4]:
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
+        
     parts.append(types.Part.from_text(text=build_caption_prompt(cfg, category, tmpl_text)))
     return gemini_call(parts)
 
@@ -399,6 +384,7 @@ async def post_album_to_channel(bot, image_paths: list, caption: str):
 
     media = []
     files = {}
+
     for i, path in enumerate(image_paths):
         field = f"photo{i}"
         files[field] = open(path, "rb")
@@ -449,19 +435,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     shop = cfg.get("shop_name", "your shop") if cfg else "not configured yet"
     await update.message.reply_text(
         f"👋 *Smart Product Poster*\n\n🏪 Shop: {shop}\n"
-        f"Send me a *ZIP file* with product photos.\n\n"
-        f"/quota — check Gemini quota\n"
-        f"/shop — show shop config\n"
-        f"/newtemplate Name | text — save a template\n"
-        f"/templates — list saved templates\n"
-        f"/deltemplate Name — delete a template",
-        parse_mode=ParseMode.MARKDOWN)
+        f"Send me a *ZIP file* with product photos. I'll auto-group them, "
+        f"write descriptions, and post them as albums.\n\n"
+        f"/newtemplate Name | text — save a reusable text block\n"
+        f"/templates — list saved templates", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_quota(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
-    await update.message.reply_text(
-        f"📊 Gemini quota: *{rate_limiter.remaining_today}/{GEMINI_RPD}*",
-        parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(f"📊 Gemini quota: *{rate_limiter.remaining_today}/{GEMINI_RPD}*", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_shop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
@@ -485,11 +466,8 @@ async def cmd_newtemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_templates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
     templates = load_templates()
-    if not templates:
-        await update.message.reply_text("📭 None saved.", parse_mode=ParseMode.MARKDOWN)
-        return
     lines = [f"• *{escape_md(name)}*\n  {escape_md(body[:80])}…" for name, body in templates.items()]
-    await update.message.reply_text("📋 *Saved templates:*\n\n" + "\n\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("📋 *Saved templates:*\n\n" + "\n\n".join(lines) if lines else "📭 None saved.", parse_mode=ParseMode.MARKDOWN)
 
 async def cmd_deltemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
@@ -499,8 +477,6 @@ async def cmd_deltemplate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         del templates[name]
         save_templates(templates)
         await update.message.reply_text(f"🗑 Deleted *{escape_md(name)}*", parse_mode=ParseMode.MARKDOWN)
-    else:
-        await update.message.reply_text(f"⚠️ No template named *{escape_md(name)}*", parse_mode=ParseMode.MARKDOWN)
 
 async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id): return
@@ -508,7 +484,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not doc or not doc.file_name.lower().endswith(".zip"): return
 
     cfg = load_shop_config()
-    status_msg = await update.message.reply_text("📦 Downloading via MTProto…")
+    status_msg = await update.message.reply_text(f"📦 Downloading via MTProto…", parse_mode=ParseMode.MARKDOWN)
 
     tmpdir = f"/tmp/poster_{update.message.message_id}"
     os.makedirs(tmpdir, exist_ok=True)
@@ -519,7 +495,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         telethon_msg = await telethon_client.get_messages(update.effective_chat.id, ids=update.message.message_id)
         await telethon_client.download_media(telethon_msg.media, file=zip_path)
 
-        await status_msg.edit_text("🤖 Analyzing photos and grouping…")
+        await status_msg.edit_text(f"🤖 Analyzing photos and grouping...", parse_mode=ParseMode.MARKDOWN)
 
         all_images = extract_all_images(zip_path, tmpdir)
         loop = asyncio.get_event_loop()
@@ -527,52 +503,38 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         total = len(groups)
         templates = load_templates()
-        group_sizes = ", ".join(str(len(g)) for g in groups)
 
         batch_key = f"{update.effective_chat.id}_{update.message.message_id}"
-        buttons = [[InlineKeyboardButton("🚫 No template — post as is",
-                                          callback_data=f"batchtmpl::__none__::{batch_key}")]]
+        buttons = [[InlineKeyboardButton("🚫 No template — post as is", callback_data=f"batchtmpl::__none__::{batch_key}")]]
         for name in templates.keys():
-            payload = f"batchtmpl::{name}::{batch_key}"
-            if len(payload.encode("utf-8")) <= 64:
-                buttons.append([InlineKeyboardButton(f"📋 {name}", callback_data=payload)])
+            buttons.append([InlineKeyboardButton(f"📋 {name}", callback_data=f"batchtmpl::{name}::{batch_key}")])
         keyboard = InlineKeyboardMarkup(buttons)
 
         event = asyncio.Event()
         ctx.bot_data.setdefault("pending_batches", {})[batch_key] = {"event": event, "template": None}
 
         await status_msg.edit_text(
-            f"📦 *{escape_md(doc.file_name)}*\n"
-            f"🖼 Found *{total} product(s)* (photos: {escape_md(group_sizes)})\n\n"
-            f"Choose a template style to apply to all products:",
+            f"📦 *{escape_md(doc.file_name)}*\n🖼 Found *{total} product(s)*\n\nChoose a template style:",
             parse_mode=ParseMode.MARKDOWN, reply_markup=keyboard)
 
         await event.wait()
-        chosen   = ctx.bot_data["pending_batches"].pop(batch_key, {})
+        chosen = ctx.bot_data["pending_batches"].pop(batch_key, {})
         tmpl_name = chosen.get("template") or "__none__"
         tmpl_text = templates.get(tmpl_name, "") if tmpl_name != "__none__" else ""
-
-        await status_msg.edit_text(
-            f"📦 *{escape_md(doc.file_name)}*\n"
-            f"▶️ Posting *{total}* product(s) — style: *{escape_md(tmpl_name) if tmpl_name != '__none__' else 'No template'}*…",
-            parse_mode=ParseMode.MARKDOWN)
 
         posted, failed, error_details = 0, 0, []
 
         for i, images in enumerate(groups, 1):
             try:
-                await status_msg.edit_text(
-                    f"⏳ Processing product *{i}/{total}*…",
-                    parse_mode=ParseMode.MARKDOWN)
-
-                caption = await loop.run_in_executor(
-                    None, generate_description, images, cfg, tmpl_text)
+                await status_msg.edit_text(f"⏳ Processing product *{i}/{total}*…", parse_mode=ParseMode.MARKDOWN)
+                
+                # Pass the template directly into the AI generation prompt
+                caption = await loop.run_in_executor(None, generate_description, images, cfg, tmpl_text)
 
                 ok_all, post_errors = True, []
                 for chunk_start in range(0, len(images), MAX_ALBUM_SIZE):
                     chunk = images[chunk_start:chunk_start + MAX_ALBUM_SIZE]
-                    ok, err_msg = await post_album_to_channel(
-                        ctx.bot, chunk, caption if chunk_start == 0 else "")
+                    ok, err_msg = await post_album_to_channel(ctx.bot, chunk, caption if chunk_start == 0 else "")
                     ok_all = ok_all and ok
                     if not ok: post_errors.append(err_msg)
                     await asyncio.sleep(2)
@@ -583,33 +545,16 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     failed += 1
                     error_details.append(f"Product {i}: " + "; ".join(post_errors))
 
-                if i < total:
-                    await asyncio.sleep(12)
-
-            except RuntimeError as e:
-                if "Daily Gemini limit" in str(e):
-                    await status_msg.edit_text(
-                        f"⛔ Daily quota exhausted after {posted}/{total} products.\n{e}")
-                    return
-                failed += 1
-                error_details.append(f"Product {i}: {e}")
+                if i < total: await asyncio.sleep(12)
             except Exception as e:
                 failed += 1
-                error_details.append(f"Product {i}: {type(e).__name__}: {e}")
-                log.exception(f"Unexpected error on product {i}")
+                log.exception(f"Unexpected error on product {i}: {e}")
 
-        icon = "✅" if failed == 0 else "⚠️"
-        await status_msg.edit_text(
-            f"{icon} *Done!*\n\n📮 Posted: *{posted}*\n❌ Failed: *{failed}*\n"
-            f"📊 Quota left: *{rate_limiter.remaining_today}/{GEMINI_RPD}*",
-            parse_mode=ParseMode.MARKDOWN)
-
-        if error_details:
-            err_text = "🔍 Failure details:\n\n" + "\n\n".join(f"• {d[:300]}" for d in error_details)
-            await update.message.reply_text(err_text[:4000])
+        report = f"✅ *Done!*\n\n📮 Posted: *{posted}*\n❌ Failed: *{failed}*"
+        await status_msg.edit_text(report, parse_mode=ParseMode.MARKDOWN)
+        if error_details: await update.message.reply_text("🔍 Errors:\n" + "\n".join(error_details))
 
     except Exception as e:
-        log.exception("Unexpected top-level error")
         await status_msg.edit_text(f"❌ Error:\n<code>{e}</code>", parse_mode=ParseMode.HTML)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -620,27 +565,25 @@ async def handle_template_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
     if not is_allowed(query.from_user.id): return
     try:
         _, tmpl_name, batch_key = query.data.split("::", 2)
-    except ValueError:
-        return
+    except ValueError: return
+
     pending = ctx.bot_data.get("pending_batches", {}).get(batch_key)
-    if not pending:
-        await query.edit_message_text("⚠️ Session expired. Please resend the ZIP.")
-        return
+    if not pending: return
     pending["template"] = tmpl_name
     pending.get("event").set()
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).concurrent_updates(True).build()
-    app.add_handler(CommandHandler("start",       cmd_start))
-    app.add_handler(CommandHandler("quota",       cmd_quota))
-    app.add_handler(CommandHandler("shop",        cmd_shop))
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("quota", cmd_quota))
+    app.add_handler(CommandHandler("shop",  cmd_shop))
     app.add_handler(CommandHandler("newtemplate", cmd_newtemplate))
     app.add_handler(CommandHandler("templates",   cmd_templates))
     app.add_handler(CommandHandler("deltemplate", cmd_deltemplate))
     app.add_handler(CallbackQueryHandler(handle_template_choice, pattern=r"^batchtmpl::"))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_zip))
-    log.info("Bot is running.")
+    log.info("Bot is running. Send a ZIP file to start.")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
