@@ -3,9 +3,10 @@
 Telegram ZIP Bot
 - Auto-groups photos by product using Gemini Vision
 - Search Mode: Analyzes collars (sock vs no sock), colors, and micro-details
-- Caps albums at 10 images, strictly puts ONE infographic FIRST
+- Caps albums at 10 images, strictly puts infographics last
 - Excludes color/season from generated titles
 - Applies custom user-selected description templates naturally
+- Uses strict JSON parsing and optimized payloads for large batches
 """
 
 import os, sys, json, asyncio, zipfile, shutil, io, time, logging, re
@@ -117,20 +118,30 @@ def save_templates(templates: dict):
         json.dump(templates, f, ensure_ascii=False, indent=2)
 
 # ── Gemini helpers ─────────────────────────────────────────────────────────────
-def load_image_bytes(path: str, max_size=(800, 800)) -> bytes:
+def load_image_bytes(path: str, max_size=(600, 600)) -> bytes:
+    """Optimized to 600x600 for large 20+ image batches to prevent timeouts"""
     with PILImage.open(path) as img:
         img.thumbnail(max_size)
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        img.convert("RGB").save(buf, format="JPEG", quality=80)
         return buf.getvalue()
 
-def gemini_call(parts: list, max_retries: int = 5) -> str:
+def gemini_call(parts: list, max_retries: int = 5, is_json: bool = False) -> str:
     rate_limiter.wait_if_needed()
     client = genai.Client(api_key=GEMINI_KEY)
+    
+    # Configure strict output modes
+    config = types.GenerateContentConfig(temperature=0.2)
+    if is_json:
+        config.response_mime_type = "application/json"
+
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash", contents=parts)
+                model="gemini-2.5-flash", 
+                contents=parts,
+                config=config
+            )
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -153,6 +164,8 @@ def ai_group_images(image_paths: list) -> list:
     You are an expert sportswear authenticator. Look at all the provided images.
     Group the images that show the EXACT same physical product.
 
+    IMPORTANT HINT: You are receiving a large batch of images, but they belong to a SMALL number of distinct products (usually 2 to 6). Group ALL images of the same product together! Do not be afraid to group 5-10 images together if they clearly show the same product.
+
     CRITICAL GROUPING RULES - SEARCH FOR MICRO-DETAILS:
     1. DIFFERENT MODELS = DIFFERENT GROUPS. (A Nike Mercurial is NOT a Nike Phantom).
     2. DIFFERENT COLORS = DIFFERENT GROUPS.
@@ -173,32 +186,22 @@ def ai_group_images(image_paths: list) -> list:
 
     EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE somewhere in your output.
 
-    Return ONLY a valid JSON array of objects. Example:
-    [
-      {
-        "model_analysis": "Beige Phantom with GREEN swoosh, WITH sock",
-        "front_view": 2,
-        "back_view": 5,
-        "real_photos": [0, 3],
-        "infographics": [1, 4]
-      }
-    ]
-    Do not include any markdown, backticks, or explanations. Just the JSON array.
+    Return ONLY a valid JSON array of objects.
     """
     parts.append(types.Part.from_text(text=prompt))
     
     log.info(f"Sending {len(image_paths)} images to Gemini for structural clustering...")
     
     try:
-        raw = gemini_call(parts)
-        raw = raw.strip().strip("```json").strip("```").strip()
-        match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
-        if match:
-            structured_groups = json.loads(match.group())
-        else:
-            structured_groups = json.loads(raw)
+        raw = gemini_call(parts, is_json=True)
+        # Bulletproof JSON extraction
+        start = raw.find('[')
+        end = raw.rfind(']')
+        if start != -1 and end != -1:
+            raw = raw[start:end+1]
+        structured_groups = json.loads(raw)
     except Exception as e:
-        log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
+        log.warning(f"Direct clustering failed ({type(e).__name__}: {e}), falling back to 1 group per image.")
         return [[p] for p in image_paths]
         
     result = []
@@ -240,6 +243,7 @@ def ai_group_images(image_paths: list) -> list:
         if current_group_paths:
             result.append(current_group_paths[:MAX_ALBUM_SIZE])
 
+    # Failsafe: if the AI forgot any images, put them in their own groups
     missing = [i for i in range(len(image_paths)) if i not in seen_indices]
     if missing:
         for idx in missing:
