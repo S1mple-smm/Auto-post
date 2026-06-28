@@ -2,18 +2,10 @@
 """
 Telegram ZIP Bot
 - Auto-groups photos by product using Gemini Vision
-- Search Mode: Analyzes collars (sock vs no sock), colors, and micro-details
-- Caps albums at 10 images, strictly puts infographics first, and ensures front/back views are prioritized
+- Strict Album Sorting: Custom order for Jerseys vs Boots
+- Caps albums at 10 images, skips excess
 - Excludes color/season from generated titles
-- Applies custom user-selected description templates naturally
-
-IMAGE ORDER PER ALBUM:
-  1. Infographics (text/collage images) — always first for thumbnail
-  2. Front 3D render (pure white bg, no text)
-  3. Back/side 3D render
-  4. Other real photos
-  5. Basic clean white background images (plain studio shots)
-  6. Floor / lifestyle images — always last
+- Applies custom user-selected description templates
 """
 
 import os, sys, json, asyncio, zipfile, shutil, io, time, logging, re
@@ -49,10 +41,10 @@ except ImportError:
     sys.exit("❌  Run:  pip install Pillow")
 
 # ── Config (from environment variables) ───────────────────────────────────────
-API_ID         = int(os.environ["TELEGRAM_API_ID"])
-API_HASH       = os.environ["TELEGRAM_API_HASH"]
-BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
-CHANNEL_ID     = os.environ["TELEGRAM_CHAT_ID"]
+API_ID         = int(os.environ["TELEGRAM_API_ID"])      
+API_HASH       = os.environ["TELEGRAM_API_HASH"]        
+BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]    
+CHANNEL_ID     = os.environ["TELEGRAM_CHAT_ID"]      
 GEMINI_KEY     = os.environ["GEMINI_API_KEY"]
 ALLOWED_USERS  = set(os.getenv("ALLOWED_USER_IDS", "").split(","))
 
@@ -125,20 +117,57 @@ def save_templates(templates: dict):
         json.dump(templates, f, ensure_ascii=False, indent=2)
 
 # ── Gemini helpers ─────────────────────────────────────────────────────────────
-def load_image_bytes(path: str, max_size=(800, 800)) -> bytes:
+def load_image_bytes(path: str, max_size=(512, 512)) -> bytes:
+    """Downscaled to 512x512 so massive batches (26+ images) won't timeout."""
     with PILImage.open(path) as img:
         img.thumbnail(max_size)
         buf = io.BytesIO()
-        img.convert("RGB").save(buf, format="JPEG", quality=85)
+        img.convert("RGB").save(buf, format="JPEG", quality=80)
         return buf.getvalue()
 
-def gemini_call(parts: list, max_retries: int = 5) -> str:
+def safe_int(val):
+    """Safely converts stringified JSON numbers to ints so they aren't ignored."""
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+def gemini_call(parts: list, max_retries: int = 5, is_json: bool = False) -> str:
     rate_limiter.wait_if_needed()
     client = genai.Client(api_key=GEMINI_KEY)
+    
+    # Disable safety filters (sports mannequins often trigger false positives)
+    config = types.GenerateContentConfig(
+        temperature=0.1,
+        safety_settings=[
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE,
+            ),
+        ]
+    )
+    if is_json:
+        config.response_mime_type = "application/json"
+
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-3.1-flash-lite", contents=parts)
+                model="gemini-2.5-flash", 
+                contents=parts,
+                config=config
+            )
             return response.text.strip()
         except Exception as e:
             err = str(e)
@@ -150,175 +179,136 @@ def gemini_call(parts: list, max_retries: int = 5) -> str:
                 raise
     raise RuntimeError("Exhausted Gemini retries")
 
-def ai_group_images(image_paths: list) -> list:
-    """Passes all images to Gemini for highly strict grouping and sorting.
-
-    Final album order per group:
-      1. infographics   — eye-catching collages/text images (album thumbnail)
-      2. front_view     — front 3D render on white bg
-      3. back_view      — back/side 3D render on white bg
-      4. real_photos    — real-life / action photos
-      5. other_photos   — anything uncategorised
-      6. basic_photos   — plain white bg studio shots with NO text (boring, go near end)
-      7. floor_photos   — product lying/standing on floor/grass (go last)
-    """
+def ai_group_images(image_paths: list) -> tuple:
+    """Returns (grouped_lists, error_message). Uses highly structured JSON roles for exact sorting."""
     parts = []
     for i, path in enumerate(image_paths):
         parts.append(types.Part.from_text(text=f"Image Index: {i}"))
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-
+        
     prompt = """
     You are an expert sportswear authenticator. Look at all the provided images.
     Group the images that show the EXACT same physical product.
 
+    IMPORTANT HINT: You are receiving a large batch of images, but they belong to a SMALL number of distinct products. Group ALL images of the same product together!
+
     CRITICAL GROUPING RULES - SEARCH FOR MICRO-DETAILS:
-    1. DIFFERENT MODELS = DIFFERENT GROUPS. (A Nike Mercurial is NOT a Nike Phantom).
-    2. DIFFERENT COLORS = DIFFERENT GROUPS.
-    3. DIFFERENT LOGO/ACCENT COLORS = DIFFERENT GROUPS. A beige boot with a GREEN logo is a completely different product from a beige boot with a GOLD logo. Check the swoosh and soles closely!
-    4. BOOT COLLAR / SOCK DESIGN: This is extremely important. For footwear, a boot WITH a built-in ankle sock (high-top) is a COMPLETELY DIFFERENT product from the exact same color boot WITHOUT a sock (low-cut). Never mix sock and no-sock boots in the same group!
+    1. DIFFERENT MODELS = DIFFERENT GROUPS.
+    2. DIFFERENT BASE COLORS = DIFFERENT GROUPS.
+    3. DIFFERENT LOGO/ACCENT COLORS = DIFFERENT GROUPS. Pay extreme attention to the swoosh/logo! A beige boot with a GREEN logo is a completely different product from a beige boot with a GOLD logo.
+    4. COLLAR / SOCK DESIGN: A boot WITH a built-in ankle sock (high-top) is a completely different product from the exact same color boot WITHOUT a sock (low-cut). Never mix them!
 
-    CRITICAL CATEGORIZATION RULES (WITHIN EACH GROUP):
-    - "Infographics": ANY image that contains TEXT, labels, dimensions, grass icons, Russian words, OR multiple angles stitched into a square collage. These are the MOST IMPORTANT images and must be listed first.
-    - "Front 3D Render": A single floating product shot from the FRONT on a PURE WHITE background. NO text whatsoever. The product appears to "float" with no floor or shadow visible.
-    - "Back 3D Render": A single floating product shot from the BACK or SIDE on a PURE WHITE background. NO text whatsoever. The product appears to "float" with no floor or shadow visible.
-    - "Wide Front Shot": A wide/landscape photo showing the FRONT-FACING side of the product. May have a simple background but NOT pure white floating. The product is clearly facing toward the camera. These come right after 3D renders.
-    - "Wide Back Shot": A wide/landscape photo showing the BACK or SIDE of the product. May have a simple background but NOT pure white floating. The product is turned away or sideways. These come after wide front shots.
-    - "Real Photos": Close-up or medium shots taken in real life — held in hands, worn, showing texture/wrinkles. NOT wide format. NOT on a floor/ground surface.
-    - "Basic Photos": Plain, clean studio shots on a white background with NO text — simple and minimal. NOT floating renders. NOT infographics. These are boring and go near the end.
-    - "Floor Photos": ANY image where the product is resting, lying, or standing ON a floor, ground, grass, or any surface below. Even if the shot looks "nice", if the product is ON the ground — it goes here. ALWAYS LAST.
+    CRITICAL CATEGORIZATION RULES (FOR SORTING):
+    You must classify the images into these exact fields (use null or [] if none apply):
+    - "product_type": strictly "boots" or "jersey"
+    - "infographics": array of indices. ANY image with text, specs, Russian words, grass icons, or collages.
+    - "render_front": index of the main 3D render front view (pure white background, no text).
+    - "render_back": index of the 3D render back/side view.
+    - "photo_front": index of the real photo front view (wide shot on a person, mannequin, or clean shoe profile).
+    - "photo_back": index of the real photo back/heel view.
+    - "photo_bottom_sole": index of the photo showing the bottom spikes/sole (for boots only).
+    - "photo_closeups": array of indices showing zoomed-in details (texture, logo, laces).
+    - "photo_flatlays": array of indices showing the item laid flat on the floor/table.
 
-    For each product group, you MUST provide ALL of these fields:
-    - "model_analysis": Think step-by-step. Describe the base color, logo color, sole, and COLLAR TYPE (sock vs no sock). (e.g., "Beige Phantom, low-cut no sock, green swoosh"). This stops you from mixing items!
-    - "infographics": Array of indices for ALL infographic/collage/text images. PUT THESE FIRST — they are the album cover.
-    - "front_view": Single index of the Front 3D Render (pure white background, product floating, NO text). If none exists, use null. NEVER use an Infographic or wide shot here.
-    - "back_view": Single index of the Back/Side 3D Render (pure white background, product floating, NO text). Use null if none. NEVER use an Infographic or wide shot here.
-    - "wide_front": Array of indices for wide/landscape photos where the FRONT of the product faces the camera. NOT floating on white. NOT on a floor. NOT infographics.
-    - "wide_back": Array of indices for wide/landscape photos where the BACK or SIDE of the product faces the camera. NOT floating on white. NOT on a floor. NOT infographics.
-    - "real_photos": Array of indices for close-up or medium real-life photos NOT in wide format and NOT on a floor/ground.
-    - "basic_photos": Array of indices for plain clean white background images with NO text that are NOT the main floating front or back render.
-    - "floor_photos": Array of indices for ANY image where the product is resting ON a floor, ground, or grass — regardless of angle or quality. THESE ALWAYS GO LAST.
+    For each group, you MUST provide:
+    - "model_analysis": Think step-by-step. Base color, logo color, sole, and COLLAR TYPE (sock vs no sock).
+    - "product_type": "boots" or "jersey"
+    - "infographics": [ ... ]
+    - "render_front": X
+    - "render_back": X
+    - "photo_front": X
+    - "photo_back": X
+    - "photo_bottom_sole": X
+    - "photo_closeups": [ ... ]
+    - "photo_flatlays": [ ... ]
 
-    EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE across all fields combined.
-
-    Return ONLY a valid JSON array of objects. Example:
-    [
-      {
-        "model_analysis": "Beige Phantom with GREEN swoosh, WITH sock",
-        "infographics": [1, 4],
-        "front_view": 2,
-        "back_view": 5,
-        "wide_front": [7],
-        "wide_back": [8],
-        "real_photos": [3],
-        "basic_photos": [0],
-        "floor_photos": [6]
-      }
-    ]
-    Do not include any markdown, backticks, or explanations. Just the JSON array.
+    EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE. ALL INDICES MUST BE INTEGERS, NOT STRINGS.
+    Return ONLY a valid JSON array of objects.
     """
     parts.append(types.Part.from_text(text=prompt))
-
+    
     log.info(f"Sending {len(image_paths)} images to Gemini for structural clustering...")
-
+    error_msg = None
+    
     try:
-        raw = gemini_call(parts)
-        raw = raw.strip().strip("```json").strip("```").strip()
-        match = re.search(r'\[\s*\{.*?\}\s*\]', raw, re.DOTALL)
-        if match:
-            structured_groups = json.loads(match.group())
-        else:
-            structured_groups = json.loads(raw)
+        raw = gemini_call(parts, is_json=True)
+        start = raw.find('[')
+        end = raw.rfind(']')
+        if start != -1 and end != -1:
+            raw = raw[start:end+1]
+        structured_groups = json.loads(raw)
     except Exception as e:
-        log.warning(f"Direct clustering failed ({e}), falling back to 1 group per image.")
-        return [[p] for p in image_paths]
-
+        log.warning(f"Clustering failed ({type(e).__name__}: {e}).")
+        error_msg = f"AI Grouping Failed: {e}"
+        return [[p] for p in image_paths], error_msg
+        
     result = []
     seen_indices = set()
-
     for group in structured_groups:
-        current_group_paths = []
+        ptype = group.get("product_type", "jersey").lower()
+        
+        # Safely convert AI outputs
+        front_r = safe_int(group.get("render_front"))
+        back_r = safe_int(group.get("render_back"))
+        front_p = safe_int(group.get("photo_front"))
+        back_p = safe_int(group.get("photo_back"))
+        bottom_p = safe_int(group.get("photo_bottom_sole"))
+        
+        raw_info = group.get("infographics", [])
+        raw_close = group.get("photo_closeups", [])
+        raw_flat = group.get("photo_flatlays", [])
+        
+        infos = [safe_int(x) for x in (raw_info if isinstance(raw_info, list) else []) if safe_int(x) is not None]
+        closeups = [safe_int(x) for x in (raw_close if isinstance(raw_close, list) else []) if safe_int(x) is not None]
+        flatlays = [safe_int(x) for x in (raw_flat if isinstance(raw_flat, list) else []) if safe_int(x) is not None]
 
-        # Extract all categories from Gemini response
-        front_idx    = group.get("front_view")
-        back_idx     = group.get("back_view")
-        infographics = group.get("infographics", []) or []
-        wide_front   = group.get("wide_front", []) or []
-        wide_back    = group.get("wide_back", []) or []
-        real_photos  = group.get("real_photos", []) or []
-        other_photos = group.get("other_photos", []) or []   # legacy fallback key
-        basic_photos = group.get("basic_photos", []) or []
-        floor_photos = group.get("floor_photos", []) or []
-
-        # Mark all indices as seen to detect missing ones later
-        all_indices = (
-            [front_idx, back_idx]
-            + infographics
-            + wide_front
-            + wide_back
-            + real_photos
-            + other_photos
-            + basic_photos
-            + floor_photos
-        )
-        for idx in all_indices:
-            if isinstance(idx, int):
+        # Gather all mentioned indices so we don't lose any
+        all_mentioned = []
+        for idx in [front_r, back_r, front_p, back_p, bottom_p] + infos + closeups + flatlays:
+            if idx is not None:
+                all_mentioned.append(idx)
                 seen_indices.add(idx)
 
-        def add(idx):
-            """Safely add an image path by index if valid and not already added."""
-            if isinstance(idx, int) and 0 <= idx < len(image_paths):
-                p = image_paths[idx]
-                if p not in current_group_paths:
-                    current_group_paths.append(p)
+        current_group_paths = []
+        def add_to_group(idx):
+            if idx is not None and 0 <= idx < len(image_paths) and image_paths[idx] not in current_group_paths:
+                current_group_paths.append(image_paths[idx])
 
-        # ── ALBUM ORDER ────────────────────────────────────────────────────────
-        # 1. Infographics FIRST — these become the album thumbnail in Telegram
-        for idx in infographics:
-            add(idx)
-
-        # 2. Front 3D render
-        add(front_idx)
-
-        # 3. Back / side 3D render
-        add(back_idx)
-
-        # 4. Wide front shots
-        for idx in wide_front:
-            add(idx)
-
-        # 5. Wide back / side shots
-        for idx in wide_back:
-            add(idx)
-
-        # 6. Real-life photos (action, hands, wrinkles, etc.)
-        for idx in real_photos:
-            add(idx)
-
-        # 7. Other / uncategorised photos (legacy fallback)
-        for idx in other_photos:
-            add(idx)
-
-        # 8. Basic clean white background images (plain, no text) — near end
-        for idx in basic_photos:
-            add(idx)
-
-        # 9. Floor / ground / grass images — always last
-        for idx in floor_photos:
-            add(idx)
-        # ──────────────────────────────────────────────────────────────────────
-
-        # Cap at MAX_ALBUM_SIZE and add to results
+        # === THE EXACT SORTING LOGIC REQUESTED ===
+        if ptype == "boots":
+            # BOOTS: 1. Infographic, 2. Front, 3. Back, 4. Bottom
+            if infos: add_to_group(infos[0])
+            add_to_group(front_r)
+            add_to_group(front_p)
+            add_to_group(back_r)
+            add_to_group(back_p)
+            add_to_group(bottom_p)
+            for i in infos[1:]: add_to_group(i)
+            for i in closeups: add_to_group(i)
+            for i in flatlays: add_to_group(i)
+            for i in all_mentioned: add_to_group(i) # catch-all for any stragglers
+        else:
+            # JERSEY: 1. Render Front, 2. Render Back, 3. Photo Front, 4. Photo Back, 5. Closeups, 6. Flatlays (Floor)
+            add_to_group(front_r)
+            add_to_group(back_r)
+            add_to_group(front_p)
+            add_to_group(back_p)
+            for i in closeups: add_to_group(i)
+            for i in flatlays: add_to_group(i)
+            for i in infos: add_to_group(i)
+            for i in all_mentioned: add_to_group(i) # catch-all for any stragglers
+            
+        # Strictly discard anything over MAX_ALBUM_SIZE (10)
         if current_group_paths:
             result.append(current_group_paths[:MAX_ALBUM_SIZE])
 
-    # Any image Gemini missed gets its own single-image group
+    # Failsafe: if the AI forgot any images, put them in their own groups
     missing = [i for i in range(len(image_paths)) if i not in seen_indices]
     if missing:
-        log.warning(f"Gemini missed {len(missing)} image(s), adding as solo groups: {missing}")
         for idx in missing:
             result.append([image_paths[idx]])
 
-    return result or [image_paths]
+    return result or [[p] for p in image_paths], error_msg
 
 def detect_product_category(image_paths: list) -> str:
     parts = []
@@ -426,7 +416,7 @@ def generate_description(image_paths: list, cfg: dict, tmpl_text: str = "") -> s
     parts = []
     for path in image_paths[:4]:
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
-
+        
     parts.append(types.Part.from_text(text=build_caption_prompt(cfg, category, tmpl_text)))
     return gemini_call(parts)
 
@@ -572,7 +562,10 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         all_images = extract_all_images(zip_path, tmpdir)
         loop = asyncio.get_event_loop()
-        groups = await loop.run_in_executor(None, ai_group_images, all_images)
+        groups, ai_error = await loop.run_in_executor(None, ai_group_images, all_images)
+
+        if ai_error:
+            await update.message.reply_text(f"⚠️ **AI Grouping Notice:**\n`{ai_error}`", parse_mode=ParseMode.MARKDOWN)
 
         total = len(groups)
         templates = load_templates()
@@ -600,8 +593,7 @@ async def handle_zip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         for i, images in enumerate(groups, 1):
             try:
                 await status_msg.edit_text(f"⏳ Processing product *{i}/{total}*…", parse_mode=ParseMode.MARKDOWN)
-
-                # Pass the template directly into the AI generation prompt
+                
                 caption = await loop.run_in_executor(None, generate_description, images, cfg, tmpl_text)
 
                 ok_all, post_errors = True, []
