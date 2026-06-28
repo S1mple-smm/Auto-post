@@ -187,43 +187,47 @@ def ai_group_images(image_paths: list) -> tuple:
         parts.append(types.Part.from_bytes(data=load_image_bytes(path), mime_type="image/jpeg"))
         
     prompt = """
-    You are an expert sportswear authenticator. Look at all the provided images.
-    Group the images that show the EXACT same physical product.
+    You are an expert sportswear authenticator. Group the provided images by EXACT physical product.
 
-    IMPORTANT HINT: You are receiving a large batch of images, but they belong to a SMALL number of distinct products. Group ALL images of the same product together!
+    CRITICAL INSTRUCTION: You are receiving many images, but there are only a FEW distinct products. DO NOT put every image in its own group! Combine all angles, renders, and photos of the exact same item into ONE group.
 
-    CRITICAL GROUPING RULES - SEARCH FOR MICRO-DETAILS:
+    GROUPING RULES:
     1. DIFFERENT MODELS = DIFFERENT GROUPS.
     2. DIFFERENT BASE COLORS = DIFFERENT GROUPS.
-    3. DIFFERENT LOGO/ACCENT COLORS = DIFFERENT GROUPS. Pay extreme attention to the swoosh/logo! A beige boot with a GREEN logo is a completely different product from a beige boot with a GOLD logo.
-    4. COLLAR / SOCK DESIGN: A boot WITH a built-in ankle sock (high-top) is a completely different product from the exact same color boot WITHOUT a sock (low-cut). Never mix them!
+    3. DIFFERENT LOGO/ACCENT COLORS = DIFFERENT GROUPS (e.g., beige boot with GREEN logo is different from beige boot with GOLD logo).
+    4. BOOT COLLAR: A boot WITH an ankle sock is a completely different product from a boot WITHOUT a sock.
 
-    CRITICAL CATEGORIZATION RULES (FOR SORTING):
-    You must classify the images into these exact fields (use null or [] if none apply):
-    - "product_type": strictly "boots" or "jersey"
-    - "infographics": array of indices. ANY image with text, specs, Russian words, grass icons, or collages.
-    - "render_front": index of the main 3D render front view (pure white background, no text).
-    - "render_back": index of the 3D render back/side view.
-    - "photo_front": index of the real photo front view (wide shot on a person, mannequin, or clean shoe profile).
-    - "photo_back": index of the real photo back/heel view.
-    - "photo_bottom_sole": index of the photo showing the bottom spikes/sole (for boots only).
-    - "photo_closeups": array of indices showing zoomed-in details (texture, logo, laces).
-    - "photo_flatlays": array of indices showing the item laid flat on the floor/table.
-
-    For each group, you MUST provide:
-    - "model_analysis": Think step-by-step. Base color, logo color, sole, and COLLAR TYPE (sock vs no sock).
+    IMAGE CATEGORIZATION (Assign every index to EXACTLY ONE field):
     - "product_type": "boots" or "jersey"
-    - "infographics": [ ... ]
-    - "render_front": X
-    - "render_back": X
-    - "photo_front": X
-    - "photo_back": X
-    - "photo_bottom_sole": X
-    - "photo_closeups": [ ... ]
-    - "photo_flatlays": [ ... ]
+    - "infographics": [indices of images with text, specs, Russian words, grass icons, or collages]
+    - "render_front": index of front 3D render (white background, no text). null if none.
+    - "render_back": index of back/side 3D render. null if none.
+    - "photo_front": index of real photo front view (on person or clean profile). null if none.
+    - "photo_back": index of real photo back/heel view. null if none.
+    - "photo_bottom_sole": index of bottom spikes/sole. null if none.
+    - "photo_closeups": [indices of zoomed-in details like texture, logo, laces]
+    - "photo_flatlays": [indices of item laid flat on floor/table]
+
+    For each group, provide "model_analysis" describing base color, logo color, sole, and collar type.
 
     EVERY SINGLE IMAGE INDEX MUST APPEAR EXACTLY ONCE. ALL INDICES MUST BE INTEGERS, NOT STRINGS.
     Return ONLY a valid JSON array of objects.
+
+    EXAMPLE FORMAT:
+    [
+      {
+        "model_analysis": "Beige Phantom, no sock, green swoosh",
+        "product_type": "boots",
+        "infographics": [0, 5],
+        "render_front": 1,
+        "render_back": 2,
+        "photo_front": null,
+        "photo_back": null,
+        "photo_bottom_sole": 3,
+        "photo_closeups": [4],
+        "photo_flatlays": []
+      }
+    ]
     """
     parts.append(types.Part.from_text(text=prompt))
     
