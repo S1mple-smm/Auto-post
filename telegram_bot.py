@@ -164,7 +164,7 @@ def gemini_call(parts: list, max_retries: int = 5, is_json: bool = False) -> str
     for attempt in range(1, max_retries + 1):
         try:
             response = client.models.generate_content(
-                model="gemini-2.5-flash", 
+                model="gemini-3.1-flash-lite", 
                 contents=parts,
                 config=config
             )
