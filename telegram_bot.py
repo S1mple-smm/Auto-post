@@ -334,8 +334,9 @@ CATEGORY_PROFILES = {
     "jersey": {
         "sizes_key": "sizes",
         "default_sizes": "S, M, L, XL, 2XL",
+        "title_rule": "First line MUST be 'Футбольная форма [Название команды]:' on a single line. CRITICAL LANGUAGE RULE: Write Club names in ENGLISH (e.g., 'Футбольная форма Real Madrid:'). Write National Team/Country names in RUSSIAN (e.g., 'Футбольная форма Сборной Португалии:'). DO NOT put the team name on a separate line.",
         "example": (
-            "Футбольная форма клуба/сборной:\n"
+            "Футбольная форма Сборной Португалии:\n"
             "⚽Многофункциональная: Идеально подходит для футбола и бега.\n"
             "📐Размеры: В наличии размеры {sizes}.\n"
             "🧵Материал: Легкий и дышащий полиэстер\n"
@@ -348,8 +349,9 @@ CATEGORY_PROFILES = {
     "boots": {
         "sizes_key": "shoe_sizes",
         "default_sizes": "38, 39, 40, 41, 42, 43, 44, 45",
+        "title_rule": "First line MUST be 'Футбольные бутсы [Название модели]:' on a single line. CRITICAL LANGUAGE RULE: Write the model name strictly in ENGLISH (e.g., 'Футбольные бутсы Phantom:', 'Футбольные бутсы Mercurial:'). IDENTIFY the specific model name ONLY. DO NOT include colors, seasons, years, or parent brand names.",
         "example": (
-            "Футбольные бутсы:\n"
+            "Футбольные бутсы Phantom:\n"
             "⚽Назначение: Для игры на натуральном и искусственном газоне.\n"
             "📐Размеры: В наличии размеры {sizes}.\n"
             "👟Комфорт: Плотная посадка для уверенного контроля.\n"
@@ -361,6 +363,7 @@ CATEGORY_PROFILES = {
     "other": {
         "sizes_key": "sizes",
         "default_sizes": "Универсальный",
+        "title_rule": "First line MUST be '[Название аксессуара]:' on a single line (e.g., 'Спортивный рюкзак:' or 'Вратарские перчатки:').",
         "example": (
             "Спортивный аксессуар:\n"
             "⚽Многофункциональный: Идеально подходит для тренировок.\n"
@@ -383,6 +386,7 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
 
     profile = CATEGORY_PROFILES.get(category, CATEGORY_PROFILES["jersey"])
     sizes   = cfg.get(profile["sizes_key"]) or cfg.get("sizes") or profile["default_sizes"]
+    title_rule = profile.get("title_rule", "First line: Identify the product clearly on a single line.")
 
     if tmpl_text:
         return (
@@ -394,7 +398,7 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
             f"---------------------\n\n"
             f"CRITICAL RULES:\n"
             f"1. Use the EXACT structure, emojis, and text layout from the custom template.\n"
-            f"2. IDENTIFY THE MODEL: Look at the images and identify the specific model line (e.g. 'Phantom', 'Mercurial'). Put ONLY this model name on the very first line.\n"
+            f"2. TITLE STRUCTURE: {title_rule}\n"
             f"3. STRICT OMISSIONS: DO NOT include the color of the item. DO NOT include the season or year (e.g. '2024'). DO NOT use parent brand names (like 'Adidas', 'Nike').\n"
             f"4. Ensure shop details are injected (Sizes: {sizes}, Price: {price}, Delivery: {delivery}).\n"
             f"5. Always append the shop links at the very bottom:\n{uzum_line}{tg_line}{admin}\n"
@@ -409,7 +413,8 @@ def build_caption_prompt(cfg: dict, category: str, tmpl_text: str = "") -> str:
             f"You are a product copywriter for a sportswear shop.\n"
             f"Look at the product image(s) and write a Telegram post in {lang} "
             f"EXACTLY following this style:\n\n{example}\n\nRules:\n"
-            f"- First line: IDENTIFY the specific model name ONLY (e.g. 'Phantom', 'Mercurial'). DO NOT include colors, seasons, years, or parent brand names.\n"
+            f"- TITLE STRUCTURE: {title_rule}\n"
+            f"- STRICT OMISSIONS: DO NOT include colors, seasons, years, or parent brand names.\n"
             f"- Emoji bullets for each feature\n"
             f"- Output ONLY the post text, no markdown, no backticks"
         )
